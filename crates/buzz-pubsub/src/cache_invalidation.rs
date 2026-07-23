@@ -13,9 +13,10 @@
 
 use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+pub use buzz_messaging_api::control::{CacheInvalidation, ScopedCacheInvalidation};
 
 use crate::topic::BUZZ_PREFIX;
 
@@ -48,43 +49,6 @@ pub fn parse_cache_invalidation_channel(channel: &str) -> Option<CommunityId> {
         return None;
     }
     Some(CommunityId::from_uuid(community_id))
-}
-
-/// A cache-key drop to apply on every pod. Each variant mirrors exactly one of
-/// the relay's local `invalidate_*` operations. The community is carried by
-/// [`ScopedCacheInvalidation`], not by the tenant-local operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "op")]
-pub enum CacheInvalidation {
-    /// Drop the `(channel_id, pubkey)` membership entry and the user's
-    /// accessible-channels entry. Mirrors `invalidate_membership`.
-    Membership {
-        /// Channel whose membership changed.
-        channel_id: Uuid,
-        /// Affected member's pubkey bytes.
-        pubkey: Vec<u8>,
-    },
-    /// Drop every user's accessible-channels entry. Mirrors
-    /// `invalidate_all_accessible_channels` (e.g. a new open channel).
-    AccessibleAll,
-    /// Drop the cached visibility for a single channel. Mirrors
-    /// `invalidate_channel_visibility` (e.g. an open→private flip).
-    Visibility {
-        /// Channel whose visibility changed.
-        channel_id: Uuid,
-    },
-    /// Drop all membership / accessible / visibility caches. Mirrors
-    /// `invalidate_channel_deleted`.
-    ChannelDeleted,
-}
-
-/// A cache invalidation received from a community-scoped Redis channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopedCacheInvalidation {
-    /// Community whose local cache key should be dropped.
-    pub community_id: CommunityId,
-    /// Tenant-local cache invalidation operation.
-    pub invalidation: CacheInvalidation,
 }
 
 /// Initial reconnect backoff (1 second).

@@ -6,6 +6,9 @@ members = [
     "crates/buzz-push-gateway",
     "crates/buzz-db",
     "crates/buzz-pubsub",
+    "crates/buzz-messaging-api",
+    "crates/buzz-state-api",
+    "crates/buzz-storage-api",
     "crates/buzz-auth",
     "crates/buzz-search",
     "crates/buzz-audit",
@@ -126,6 +129,9 @@ buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
+buzz-messaging-api = { path = "crates/buzz-messaging-api" }
+buzz-state-api = { path = "crates/buzz-state-api" }
+buzz-storage-api = { path = "crates/buzz-storage-api" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }

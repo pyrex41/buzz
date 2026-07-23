@@ -1,0 +1,16 @@
+[package]
+name = "buzz-messaging-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport-neutral pub/sub trait and message DTOs for Buzz relays"
+
+[dependencies]
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

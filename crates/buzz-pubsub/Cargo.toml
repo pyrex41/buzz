@@ -10,6 +10,7 @@ description = "Redis pub/sub fan-out, presence, and typing indicators for Buzz"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
+buzz-messaging-api = { workspace = true }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
 tokio = { workspace = true }

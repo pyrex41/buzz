@@ -945,6 +945,7 @@ name = "buzz-db"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-storage-api",
  "chrono",
  "hex",
  "nostr",
@@ -1018,6 +1019,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-messaging-api"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "nostr",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
@@ -1068,6 +1081,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-auth",
  "buzz-core",
+ "buzz-messaging-api",
  "chrono",
  "deadpool-redis",
  "futures-util",
@@ -1224,6 +1238,23 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-state-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buzz-storage-api"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "thiserror 2.0.18",
  "uuid",
 ]
 

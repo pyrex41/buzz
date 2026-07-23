@@ -57,16 +57,7 @@ use crate::cache_invalidation::{
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
-/// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
-#[derive(Debug, Clone)]
-pub struct ChannelEvent {
-    /// Server-resolved community that scoped the Redis topic.
-    pub community_id: buzz_core::CommunityId,
-    /// Tenant-local routing scope for this event.
-    pub topic: EventTopic,
-    /// The Nostr event payload.
-    pub event: nostr::Event,
-}
+pub use buzz_messaging_api::ChannelEvent;
 
 /// Configuration for the pub/sub subsystem.
 #[derive(Debug, Clone)]
