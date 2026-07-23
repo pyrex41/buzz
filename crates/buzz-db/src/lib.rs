@@ -53,7 +53,7 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome};
+pub use event::{CommandEventPersist, CommandEventTx, EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
@@ -63,7 +63,7 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
-fn event_replacement_lock_key(
+pub(crate) fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
@@ -647,6 +647,25 @@ impl Db {
     /// The transaction holds an owned pool handle, not a borrow.
     pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
         self.pool.begin().await.map_err(Into::into)
+    }
+
+    /// Persist a command-kind event with an idempotency guard, returning an
+    /// opaque open-transaction handle to commit after the command's domain
+    /// mutation succeeds.
+    ///
+    /// For NIP-33 command kinds (those carrying a `d` tag), writers for the
+    /// same coordinate are serialized via an advisory lock and stale writes
+    /// are reported as [`CommandEventPersist::Duplicate`] (last-write-wins).
+    /// Duplicates by event id (`ON CONFLICT DO NOTHING`) are reported the
+    /// same way. Dropping the returned [`CommandEventTx`] guard rolls the
+    /// event insert back.
+    pub async fn persist_command_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<CommandEventPersist> {
+        event::persist_command_event(&self.pool, community_id, event, channel_id).await
     }
 
     /// Returns the community mapped to a normalized request host, if one exists.

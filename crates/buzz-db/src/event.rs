@@ -1426,6 +1426,153 @@ pub async fn release_due_reminder(
     Ok(result.rows_affected() == 1)
 }
 
+/// Result of persisting a command-kind event: either a duplicate (already
+/// processed) or an inserted row guarded by an open transaction.
+pub enum CommandEventPersist {
+    /// Event was already stored (or dominated by a newer NIP-33 write) —
+    /// treat as idempotent success and skip domain mutations.
+    Duplicate,
+    /// Event inserted — the row is held in an open transaction. Commit the
+    /// guard after the command's domain mutation succeeds.
+    Inserted(CommandEventTx),
+}
+
+/// Opaque open transaction guarding a freshly persisted command event.
+///
+/// Dropping the guard rolls back the event insert; call
+/// [`CommandEventTx::commit`] once the command's domain mutation has
+/// succeeded so the event record and mutation land together.
+pub struct CommandEventTx(Transaction<'static, Postgres>);
+
+impl CommandEventTx {
+    /// Commit the guarded event insert.
+    pub async fn commit(self) -> Result<()> {
+        self.0.commit().await.map_err(DbError::from)
+    }
+}
+
+/// Persist a command-kind event inside a transaction with an idempotency
+/// guard (`ON CONFLICT DO NOTHING`).
+///
+/// For NIP-33 command kinds (those carrying a `d` tag, e.g. workflow
+/// definitions), writers for the same `(community, kind, pubkey, d_tag)`
+/// coordinate are serialized via an advisory lock and stale writes are
+/// rejected as [`CommandEventPersist::Duplicate`] (last-write-wins); the
+/// previous head is soft-deleted before the new head is inserted.
+///
+/// Domain mutations execute on the connection pool, NOT inside this
+/// transaction. The pattern is idempotent but not strictly atomic: if a
+/// mutation succeeds but commit fails, the mutation persists without the
+/// event record; on retry the event INSERT succeeds and the (idempotent)
+/// mutation re-executes.
+pub(crate) async fn persist_command_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<CommandEventPersist> {
+    let mut tx = pool.begin().await?;
+
+    let id_bytes = event.id.as_bytes();
+    let pubkey_bytes = event.pubkey.to_bytes();
+    let sig_bytes = event.sig.serialize();
+    let tags_json = serde_json::to_value(&event.tags)?;
+    let kind_i32 = event.kind.as_u16() as i32;
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let received_at = Utc::now();
+
+    // Extract d_tag for parameterized replaceable kinds (NIP-33).
+    let d_tag = extract_d_tag(event);
+    if let Some(ref d_tag) = d_tag {
+        if d_tag.len() > D_TAG_MAX_LEN {
+            return Err(DbError::InvalidData(format!(
+                "d tag too long ({} bytes, max {})",
+                d_tag.len(),
+                D_TAG_MAX_LEN,
+            )));
+        }
+
+        // Command kinds normally use plain insert semantics, but NIP-33
+        // command events (workflow definitions) replace by coordinate.
+        // Serialize writers for the same coordinate and reject stale writes
+        // before the caller executes the domain mutation, otherwise old
+        // updates can overwrite newer state.
+        let lock_key = crate::event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.as_mut())
+            .await?;
+
+        let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(tx.as_mut())
+        .await?;
+
+        let incoming_id = event.id.as_bytes().as_slice();
+        if let Some((existing_ts, existing_id)) = existing {
+            let dominated = created_at < existing_ts
+                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
+            if dominated {
+                return Ok(CommandEventPersist::Duplicate);
+            }
+
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .execute(tx.as_mut())
+            .await?;
+        }
+    }
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes.as_slice())
+    .bind(pubkey_bytes.as_slice())
+    .bind(created_at)
+    .bind(kind_i32)
+    .bind(&tags_json)
+    .bind(&event.content)
+    .bind(sig_bytes.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .bind(d_tag.as_deref())
+    .execute(tx.as_mut())
+    .await?;
+
+    if result.rows_affected() == 0 {
+        // Duplicate — rollback (implicit on drop) and signal idempotent success.
+        Ok(CommandEventPersist::Duplicate)
+    } else {
+        Ok(CommandEventPersist::Inserted(CommandEventTx(tx)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
