@@ -16,7 +16,9 @@ pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc
     // Deregister from the fan-out index before sending CLOSED so no new
     // messages are routed to this sub after the client's CLOSE is acknowledged.
     if let Some(removed) = state.sub_registry.remove_subscription(conn_id, &sub_id) {
-        state
+        // Topic bookkeeping is best-effort: the transport reconciles interest
+        // on its own loop; a failed retain only delays cross-node delivery.
+        let _ = state
             .pubsub
             .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
             .await;

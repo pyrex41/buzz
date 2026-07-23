@@ -24,6 +24,17 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Which messaging + shared-state backend the relay runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagingBackend {
+    /// Redis pub/sub + Redis shared state (multi-pod capable; the default).
+    Redis,
+    /// In-process fan-out + in-process shared state (single node, zero
+    /// external services). Rejected when the mesh is enabled: replay
+    /// protection and rate limits must be shared across pods.
+    InProcess,
+}
+
 /// Deny-by-default read-only deployment-admin configuration.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
@@ -58,6 +69,12 @@ pub struct Config {
     pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Messaging + shared-state backend selection (`BUZZ_MESSAGING_BACKEND`).
+    ///
+    /// `redis` (default) keeps today's behavior; `inproc` runs fan-out,
+    /// presence, rate limiting, and the NIP-98 replay guard in-process —
+    /// single-node only (ADR 0001) and mutually exclusive with `BUZZ_MESH=on`.
+    pub messaging_backend: MessagingBackend,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -499,6 +516,31 @@ impl Config {
             registry_refresh: std::time::Duration::from_secs(15),
         };
 
+        // Backend selection. In-process is single-node by definition, and the
+        // mesh's session fencing + cross-pod correctness fences require shared
+        // (Redis) state — reject the combination instead of silently weakening
+        // replay/rate-limit guarantees.
+        let messaging_backend = match std::env::var("BUZZ_MESSAGING_BACKEND")
+            .unwrap_or_else(|_| "redis".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "redis" => MessagingBackend::Redis,
+            "inproc" | "in-process" | "inprocess" => MessagingBackend::InProcess,
+            other => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_MESSAGING_BACKEND must be 'redis' or 'inproc', got '{other}'"
+                )))
+            }
+        };
+        if messaging_backend == MessagingBackend::InProcess && mesh.enabled {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_MESH=on requires BUZZ_MESSAGING_BACKEND=redis: mesh session fencing \
+                 and cross-pod replay/rate-limit state need a shared Redis"
+                    .to_string(),
+            ));
+        }
+
         // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
         // `on`/`true`/`1` only, anything else (absent, `off`, typos) is off.
         let mesh_demo_echo = std::env::var("BUZZ_MESH_DEMO_ECHO")
@@ -862,6 +904,7 @@ impl Config {
             database_url,
             read_database_url,
             redis_url,
+            messaging_backend,
             relay_url,
             pairing_relay_url,
             max_connections,

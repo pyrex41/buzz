@@ -263,7 +263,9 @@ async fn handle_active_connection(
     let _ = auth_timeout_task.await;
 
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
-        state
+        // Topic bookkeeping is best-effort: the transport reconciles interest
+        // on its own loop; a failed retain only delays cross-node delivery.
+        let _ = state
             .pubsub
             .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
             .await;
@@ -276,7 +278,7 @@ async fn handle_active_connection(
         );
         if remaining.is_empty() {
             let _ = state
-                .pubsub
+                .presence
                 .clear_presence(&conn.tenant, &auth_ctx.pubkey)
                 .await;
         }

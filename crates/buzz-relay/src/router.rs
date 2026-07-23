@@ -352,7 +352,11 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     let check = async {
         let (pg_ok, redis_ok) = tokio::join!(state.db.ping(), async {
-            state.redis_pool.get().await.is_ok()
+            // In-process backend has no Redis to probe — always ready.
+            match &state.redis_pool {
+                Some(pool) => pool.get().await.is_ok(),
+                None => true,
+            }
         },);
         (pg_ok, redis_ok)
     };

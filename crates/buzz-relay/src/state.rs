@@ -21,11 +21,14 @@ use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
+use buzz_messaging_api::{MessagingError, PubSub};
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
-use buzz_pubsub::rate_limiter::RedisRateLimiter;
-use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
+use buzz_pubsub::shared_state::RedisSharedState;
+use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
+use buzz_state::{PresenceStore, StateNip98ReplayGuard, StateRateLimiter};
+use buzz_state_api::SharedState;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
 
@@ -33,6 +36,67 @@ use crate::audio::AudioRoomManager;
 use crate::config::Config;
 use crate::connection::ConnectionSubscriptions;
 use crate::subscription::SubscriptionRegistry;
+
+/// The pluggable messaging + shared-state backends the relay runs on,
+/// selected by `Config::messaging_backend` (Hive plan Phase 1).
+///
+/// This is the composition seam: `main.rs` (and test helpers) build one of
+/// these and everything downstream sees only the trait objects.
+pub struct RelayBackends {
+    /// Event fan-out + cross-pod control plane.
+    pub pubsub: Arc<dyn PubSub>,
+    /// TTL KV + atomic counters backing presence, rate limits, and the
+    /// NIP-98 replay guard.
+    pub shared_state: Arc<dyn SharedState>,
+    /// Redis pool retained only for inherently Redis-bound subsystems
+    /// (mesh/tunnel session fencing, readiness probing). `None` on the
+    /// in-process profile — config validation guarantees the mesh is off.
+    pub redis_pool: Option<deadpool_redis::Pool>,
+}
+
+impl RelayBackends {
+    /// Redis-backed profile (today's production shape).
+    pub async fn redis(redis_url: &str) -> anyhow::Result<Self> {
+        let pool = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?;
+        Self::redis_from_pool(redis_url, pool).await
+    }
+
+    /// Redis-backed profile over an existing pool (test helpers).
+    pub async fn redis_from_pool(
+        redis_url: &str,
+        pool: deadpool_redis::Pool,
+    ) -> anyhow::Result<Self> {
+        let pubsub = Arc::new(
+            PubSubManager::new(redis_url, pool.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+        );
+        Ok(Self {
+            pubsub,
+            shared_state: Arc::new(RedisSharedState::new(pool.clone())),
+            redis_pool: Some(pool),
+        })
+    }
+
+    /// In-process profile — single node, zero external services.
+    pub fn in_process() -> Self {
+        Self {
+            pubsub: Arc::new(buzz_messaging_inproc::InProcessPubSub::new()),
+            shared_state: Arc::new(buzz_state::InProcessSharedState::new()),
+            redis_pool: None,
+        }
+    }
+
+    /// Build the backends selected by `config.messaging_backend`.
+    pub async fn from_config(config: &Config) -> anyhow::Result<Self> {
+        match config.messaging_backend {
+            crate::config::MessagingBackend::Redis => Self::redis(&config.redis_url).await,
+            crate::config::MessagingBackend::InProcess => Ok(Self::in_process()),
+        }
+    }
+}
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 type SlidingWindowCounter = (u32, Instant);
@@ -436,12 +500,17 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Database connection pool.
     pub db: Db,
-    /// Redis pool for readiness health checks.
-    pub redis_pool: deadpool_redis::Pool,
+    /// Redis pool for readiness checks and the mesh — `None` on the
+    /// in-process profile (mesh is validated off there).
+    pub redis_pool: Option<deadpool_redis::Pool>,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
-    /// Pub/sub manager for broadcasting events to subscribers.
-    pub pubsub: Arc<PubSubManager>,
+    /// Pub/sub transport for broadcasting events to subscribers.
+    pub pubsub: Arc<dyn PubSub>,
+    /// Shared-state backend behind presence, rate limits, and replay guard.
+    pub shared_state: Arc<dyn SharedState>,
+    /// Presence store (online/away with TTL) over `shared_state`.
+    pub presence: PresenceStore,
     /// Authentication service.
     pub auth: Arc<AuthService>,
     /// Full-text search service.
@@ -522,12 +591,14 @@ pub struct AppState {
     /// Shared, community-scoped NIP-98 replay prevention.
     ///
     /// Correctness boundary for stateless workers: every pod must consult the
-    /// same Redis `SET NX EX` seen-set, keyed by resolved community. Do not
-    /// replace this with process-local caching; replay freshness must survive
-    /// cross-pod routing.
+    /// same atomic set-if-absent seen-set, keyed by resolved community. On
+    /// multi-pod deployments that means the shared (Redis) state backend;
+    /// config validation rejects the in-process backend there. Replay
+    /// freshness must survive cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
-    /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
-    pub admission_rate_limiter: Arc<RedisRateLimiter>,
+    /// Shared admission limits for ordinary HTTP and WebSocket work,
+    /// backed by `shared_state`.
+    pub admission_rate_limiter: Arc<StateRateLimiter>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
@@ -583,9 +654,8 @@ impl AppState {
     pub fn new(
         config: Config,
         db: Db,
-        redis_pool: deadpool_redis::Pool,
+        backends: RelayBackends,
         audit: impl Into<Option<AuditService>>,
-        pubsub: Arc<PubSubManager>,
         auth: AuthService,
         search: SearchService,
         workflow_engine: Arc<WorkflowEngine>,
@@ -653,9 +723,15 @@ impl AppState {
             )
             .expect("git pack cache path must be available"),
         );
+        let RelayBackends {
+            pubsub,
+            shared_state,
+            redis_pool,
+        } = backends;
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
-            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
+            Arc::new(StateNip98ReplayGuard::new(Arc::clone(&shared_state)));
+        let admission_rate_limiter = Arc::new(StateRateLimiter::new(Arc::clone(&shared_state)));
+        let presence = PresenceStore::new(Arc::clone(&shared_state));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
@@ -663,6 +739,8 @@ impl AppState {
             redis_pool,
             audit: audit_arc,
             pubsub,
+            shared_state,
+            presence,
             auth: Arc::new(auth),
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
@@ -1002,7 +1080,7 @@ impl AppState {
     pub async fn disconnect_community_clusterwide(
         &self,
         tenant: &TenantContext,
-    ) -> Result<usize, buzz_pubsub::PubSubError> {
+    ) -> Result<usize, MessagingError> {
         let closed = self
             .community_connections
             .disconnect_community(tenant.community());
@@ -1206,14 +1284,9 @@ mod tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
+        let backends = RelayBackends::redis(&config.redis_url)
+            .await
+            .expect("redis backends");
         let audit = buzz_audit::AuditService::new(pool.clone());
         let auth = buzz_auth::AuthService::new(config.auth.clone());
         let search = buzz_search::SearchService::new(pool.clone());
@@ -1225,9 +1298,8 @@ mod tests {
         let (state, _audit_shutdown) = AppState::new(
             config,
             db,
-            redis_pool,
+            backends,
             audit,
-            pubsub,
             auth,
             search,
             workflow_engine,

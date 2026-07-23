@@ -246,12 +246,16 @@ pub async fn handle_req(
         channel_id,
     );
     if let Some(replaced) = replaced {
-        state
+        // Topic bookkeeping is best-effort: the transport reconciles interest
+        // on its own loop; a failed retain only delays cross-node delivery.
+        let _ = state
             .pubsub
             .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
             .await;
     }
-    state
+    // Topic bookkeeping is best-effort: the transport reconciles interest
+    // on its own loop; a failed retain only delays cross-node delivery.
+    let _ = state
         .pubsub
         .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
         .await;

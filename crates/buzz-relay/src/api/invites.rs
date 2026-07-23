@@ -532,11 +532,10 @@ mod tests {
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .ok()?;
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+        let backends =
+            crate::state::RelayBackends::redis_from_pool(&config.redis_url, redis_pool.clone())
                 .await
-                .ok()?,
-        );
+                .ok()?;
         let audit = buzz_audit::AuditService::new(pool.clone());
         let auth = buzz_auth::AuthService::new(config.auth.clone());
         let search = buzz_search::SearchService::new(pool.clone());
@@ -548,9 +547,8 @@ mod tests {
         let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
-            redis_pool,
+            backends,
             audit,
-            pubsub,
             auth,
             search,
             workflow_engine,

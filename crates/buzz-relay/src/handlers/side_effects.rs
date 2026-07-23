@@ -76,7 +76,9 @@ async fn evict_conn_channel_subscriptions(
     }
 
     for (sub_id, removed_scope) in removed {
-        state
+        // Topic bookkeeping is best-effort: the transport reconciles interest
+        // on its own loop; a failed retain only delays cross-node delivery.
+        let _ = state
             .pubsub
             .release_topic(tenant, topic_for_subscription(removed_scope.channel_id))
             .await;

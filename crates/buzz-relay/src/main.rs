@@ -10,7 +10,6 @@ use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
 use buzz_relay::config::Config;
@@ -333,36 +332,25 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&config.redis_url);
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
-    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
-    let pubsub = Arc::new(
-        PubSubManager::new(&config.redis_url, redis_pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+    // Messaging + shared-state backends, selected by BUZZ_MESSAGING_BACKEND:
+    // Redis (multi-pod, today's default) or in-process (single node, zero
+    // external services). Everything downstream sees only the trait objects.
+    let backends = buzz_relay::state::RelayBackends::from_config(&config).await?;
+    info!(
+        backend = ?config.messaging_backend,
+        "Messaging + shared-state backends ready"
     );
-    info!("Redis pub/sub connected");
 
-    // Spawn Redis pub/sub subscriber for multi-node fan-out.
-    // Events published by other relay instances are received here and
-    // fanned out to local WebSocket subscribers.
-    let pubsub_for_sub = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+    // Background transport driver: multi-node fan-out, cross-pod cache-key
+    // invalidation, and connection-control subscribers (reconnect loops for
+    // the Redis backend; a no-op pend for in-process). Events published by
+    // other relay instances arrive here and reach the consumer loops below.
+    let pubsub_driver = Arc::clone(&backends.pubsub);
+    tokio::spawn(async move {
+        if let Err(e) = pubsub_driver.run().await {
+            tracing::error!("pub/sub background driver stopped: {e}");
+        }
+    });
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -422,9 +410,8 @@ async fn main() -> anyhow::Result<()> {
     let (app_state, audit_shutdown) = AppState::new(
         config.clone(),
         db,
-        redis_health_pool,
+        backends,
         audit,
-        pubsub,
         auth,
         search,
         Arc::clone(&workflow_engine),
@@ -438,14 +425,22 @@ async fn main() -> anyhow::Result<()> {
     // relay behaves byte-identically to a build without the mesh. When
     // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
     // operator who asked for the mesh gets it or gets told why not.
-    if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
-        &state.config,
-        state.redis_pool.clone(),
-        &state.relay_keypair,
-        Arc::clone(&state.shutting_down),
-    )
-    .await?
-    {
+    // Mesh needs the Redis pool for session fencing; config validation
+    // guarantees `redis_pool` is Some whenever BUZZ_MESH=on (the in-process
+    // backend rejects the mesh at startup).
+    let mesh_handle = match state.redis_pool.clone() {
+        Some(mesh_redis_pool) => {
+            buzz_relay::mesh_boot::boot_mesh(
+                &state.config,
+                mesh_redis_pool,
+                &state.relay_keypair,
+                Arc::clone(&state.shutting_down),
+            )
+            .await?
+        }
+        None => None,
+    };
+    if let Some(handle) = mesh_handle {
         let runtime_id = handle.local_runtime_id;
         // Register the per-profile inbound consumers (huddle datagram fan-in,
         // HuddleControl accept loop, reliable-stream accept + optional
@@ -979,11 +974,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                let rs = pool_state.redis_pool.status();
-                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
-                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
-                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
-                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                if let Some(redis_pool) = &pool_state.redis_pool {
+                    let rs = redis_pool.status();
+                    metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                    metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                    metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                    metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                }
             }
         });
     }
