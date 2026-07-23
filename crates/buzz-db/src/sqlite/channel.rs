@@ -17,7 +17,6 @@
 //! immediate write transaction provides the same serialization the advisory
 //! locks bought on Postgres (see `update_channel` /
 //! `reap_expired_ephemeral_channels` for the TTL-trigger interplay).
-#![allow(dead_code)] // Called via the Db backend-dispatch seam (orchestrator-owned lib.rs); allow until every arm is wired.
 
 use chrono::{DateTime, Utc};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};

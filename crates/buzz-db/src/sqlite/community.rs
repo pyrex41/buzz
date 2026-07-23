@@ -12,7 +12,6 @@
 //! (`create_community_with_owner`'s per-owner limit check), this arm uses a
 //! plain `BEGIN IMMEDIATE` transaction — SQLite's single writer serializes
 //! the count-then-insert cycle end-to-end.
-#![allow(dead_code)] // Called via the Db backend-dispatch seam (orchestrator-owned lib.rs); allow until every arm is wired.
 
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use uuid::Uuid;

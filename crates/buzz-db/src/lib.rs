@@ -767,6 +767,20 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<CommandEventPersist> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return Ok(
+                match sqlite::event::persist_command_event(pool, community_id, event, channel_id)
+                    .await?
+                {
+                    sqlite::event::SqliteCommandEventPersist::Duplicate => {
+                        CommandEventPersist::Duplicate
+                    }
+                    sqlite::event::SqliteCommandEventPersist::Inserted(tx) => {
+                        CommandEventPersist::Inserted(event::CommandEventTx::from_sqlite(tx))
+                    }
+                },
+            );
+        }
         event::persist_command_event(self.pg()?, community_id, event, channel_id).await
     }
 
@@ -778,6 +792,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::lookup_community_by_host(pool, normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -804,6 +821,9 @@ impl Db {
 
     /// Returns whether a community id still exists in the active lifecycle state.
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::is_community_active(pool, community_id).await;
+        }
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
         )
@@ -818,6 +838,13 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::lookup_community_by_host_for_management(
+                pool,
+                normalized_host,
+            )
+            .await;
+        }
         let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
             .bind(normalized_host)
             .fetch_optional(self.pg()?)
@@ -839,6 +866,9 @@ impl Db {
         &self,
         owner_pubkey: &str,
     ) -> Result<Vec<OwnedCommunityRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::list_communities_owned_by(pool, owner_pubkey).await;
+        }
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let rows = sqlx::query(
             r#"
@@ -881,6 +911,9 @@ impl Db {
     /// community is authoritative; the host is read back for labelling only and
     /// is never used to re-derive the community.
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::lookup_community_host(pool, community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT host
@@ -905,6 +938,9 @@ impl Db {
     /// Set by relay admins/owners via the kind:9033 command; the value is
     /// validated and size-capped at that write path.
     pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::get_community_icon(pool, community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT icon
@@ -929,6 +965,9 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::set_community_icon(pool, community_id, icon).await;
+        }
         sqlx::query(
             r#"
             UPDATE communities
@@ -952,6 +991,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::ensure_configured_community(pool, normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -985,6 +1027,14 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<CreateCommunityWithOwnerResult> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::create_community_with_owner(
+                pool,
+                normalized_host,
+                owner_pubkey,
+            )
+            .await;
+        }
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pg()?.begin().await?;
 
@@ -1071,6 +1121,15 @@ impl Db {
         owner_pubkey: &str,
         protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::archive_community_owned_by(
+                pool,
+                normalized_host,
+                owner_pubkey,
+                protected_deployment_host,
+            )
+            .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
@@ -1103,6 +1162,14 @@ impl Db {
         normalized_host: &str,
         owner_pubkey: &str,
     ) -> Result<Option<UnarchivedCommunityRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::unarchive_community_owned_by(
+                pool,
+                normalized_host,
+                owner_pubkey,
+            )
+            .await;
+        }
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = NULL
@@ -1131,6 +1198,9 @@ impl Db {
     /// Internal relay producers use this to derive tenant context from the row
     /// they are acting on, rather than falling back to an implicit default.
     pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::community_of_channel(pool, channel_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT community_id
@@ -1172,6 +1242,9 @@ impl Db {
         &self,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, CommunityId>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::community::communities_of_channels(pool, channel_ids).await;
+        }
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -1203,6 +1276,9 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::insert_event(pool, community_id, event, channel_id).await;
+        }
         let result = event::insert_event(self.pg()?, community_id, event, channel_id).await?;
         if result.1 {
             if let Err(e) = insert_mentions(self.pg()?, community_id, event, channel_id).await {
@@ -1214,11 +1290,17 @@ impl Db {
 
     /// Queries events matching the given filter parameters.
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::query_events(pool, q).await;
+        }
         event::query_events(self.pg()?, q).await
     }
 
     /// Count events matching the given query (NIP-45 COUNT support).
     pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::count_events(pool, q).await;
+        }
         event::count_events(self.pg()?, q).await
     }
 
@@ -1231,6 +1313,16 @@ impl Db {
         ephemeral_channel_id: Uuid,
         creator_pubkey: &[u8],
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::huddle_started_link_exists(
+                pool,
+                community_id,
+                parent_channel_id,
+                ephemeral_channel_id,
+                creator_pubkey,
+            )
+            .await;
+        }
         event::huddle_started_link_exists(
             self.pg()?,
             community_id,
@@ -1252,6 +1344,15 @@ impl Db {
         kind: i32,
         pubkey_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_latest_global_replaceable(
+                pool,
+                community_id,
+                kind,
+                pubkey_bytes,
+            )
+            .await;
+        }
         event::get_latest_global_replaceable(self.pg()?, community_id, kind, pubkey_bytes).await
     }
 
@@ -1263,6 +1364,9 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_event_by_id(pool, community_id, id_bytes).await;
+        }
         event::get_event_by_id(self.pg()?, community_id, id_bytes).await
     }
 
@@ -1272,6 +1376,10 @@ impl Db {
         community_id: CommunityId,
         id_bytes: &[u8],
     ) -> Result<Option<StoredEvent>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_event_by_id_including_deleted(pool, community_id, id_bytes)
+                .await;
+        }
         event::get_event_by_id_including_deleted(self.pg()?, community_id, id_bytes).await
     }
 
@@ -1281,6 +1389,9 @@ impl Db {
         community_id: CommunityId,
         event_id: &[u8],
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::soft_delete_event(pool, community_id, event_id).await;
+        }
         event::soft_delete_event(self.pg()?, community_id, event_id).await
     }
 
@@ -1293,6 +1404,16 @@ impl Db {
         pubkey: &[u8],
         d_tag: &str,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::soft_delete_by_coordinate(
+                pool,
+                community_id,
+                kind,
+                pubkey,
+                d_tag,
+            )
+            .await;
+        }
         event::soft_delete_by_coordinate(self.pg()?, community_id, kind, pubkey, d_tag).await
     }
 
@@ -1304,6 +1425,16 @@ impl Db {
         parent_event_id: Option<&[u8]>,
         root_event_id: Option<&[u8]>,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::soft_delete_event_and_update_thread(
+                pool,
+                community_id,
+                event_id,
+                parent_event_id,
+                root_event_id,
+            )
+            .await;
+        }
         event::soft_delete_event_and_update_thread(
             self.pg()?,
             community_id,
@@ -1320,6 +1451,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<DateTime<Utc>>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_last_message_at(pool, community_id, channel_id).await;
+        }
         event::get_last_message_at(self.pg()?, community_id, channel_id).await
     }
 
@@ -1329,6 +1463,9 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_last_message_at_bulk(pool, community_id, channel_ids).await;
+        }
         event::get_last_message_at_bulk(self.pg()?, community_id, channel_ids).await
     }
 
@@ -1338,6 +1475,9 @@ impl Db {
         community_id: CommunityId,
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::get_events_by_ids(pool, community_id, ids).await;
+        }
         event::get_events_by_ids(self.pg()?, community_id, ids).await
     }
 
@@ -1504,6 +1644,16 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::insert_event_with_thread_metadata(
+                pool,
+                community_id,
+                event,
+                channel_id,
+                thread_meta,
+            )
+            .await;
+        }
         let result = event::insert_event_with_thread_metadata(
             self.pg()?,
             community_id,
@@ -1532,6 +1682,19 @@ impl Db {
         actor_pubkey: &[u8],
         emoji: &str,
     ) -> Result<event::ReactionEventInsertOutcome> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::insert_reaction_event_with_thread_metadata(
+                pool,
+                community_id,
+                event,
+                channel_id,
+                thread_meta,
+                target_event_id,
+                actor_pubkey,
+                emoji,
+            )
+            .await;
+        }
         let outcome = event::insert_reaction_event_with_thread_metadata(
             self.pg()?,
             community_id,
@@ -1566,6 +1729,19 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<channel::ChannelRecord> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::create_channel(
+                pool,
+                community_id,
+                name,
+                channel_type,
+                visibility,
+                description,
+                created_by,
+                ttl_seconds,
+            )
+            .await;
+        }
         channel::create_channel(
             self.pg()?,
             community_id,
@@ -1594,6 +1770,20 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<(channel::ChannelRecord, bool)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::create_channel_with_id(
+                pool,
+                community_id,
+                channel_id,
+                name,
+                channel_type,
+                visibility,
+                description,
+                created_by,
+                ttl_seconds,
+            )
+            .await;
+        }
         channel::create_channel_with_id(
             self.pg()?,
             community_id,
@@ -1614,6 +1804,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<channel::ChannelRecord> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_channel(pool, community_id, channel_id).await;
+        }
         channel::get_channel(self.pg()?, community_id, channel_id).await
     }
 
@@ -1623,6 +1816,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Option<String>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_canvas(pool, community_id, channel_id).await;
+        }
         channel::get_canvas(self.pg()?, community_id, channel_id).await
     }
 
@@ -1633,6 +1829,9 @@ impl Db {
         channel_id: Uuid,
         canvas: Option<&str>,
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::set_canvas(pool, community_id, channel_id, canvas).await;
+        }
         channel::set_canvas(self.pg()?, community_id, channel_id, canvas).await
     }
 
@@ -1645,6 +1844,17 @@ impl Db {
         role: channel::MemberRole,
         invited_by: Option<&[u8]>,
     ) -> Result<channel::MemberRecord> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::add_member(
+                pool,
+                community_id,
+                channel_id,
+                pubkey,
+                role,
+                invited_by,
+            )
+            .await;
+        }
         channel::add_member(
             self.pg()?,
             community_id,
@@ -1664,6 +1874,16 @@ impl Db {
         pubkey: &[u8],
         actor_pubkey: &[u8],
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::remove_member(
+                pool,
+                community_id,
+                channel_id,
+                pubkey,
+                actor_pubkey,
+            )
+            .await;
+        }
         channel::remove_member(self.pg()?, community_id, channel_id, pubkey, actor_pubkey).await
     }
 
@@ -1674,6 +1894,9 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::is_member(pool, community_id, channel_id, pubkey).await;
+        }
         channel::is_member(self.pg()?, community_id, channel_id, pubkey).await
     }
 
@@ -1694,6 +1917,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<channel::MemberRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_members(pool, community_id, channel_id).await;
+        }
         channel::get_members(self.pg()?, community_id, channel_id).await
     }
 
@@ -1703,6 +1929,9 @@ impl Db {
         community_id: CommunityId,
         channel_ids: &[Uuid],
     ) -> Result<Vec<channel::MemberRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_members_bulk(pool, community_id, channel_ids).await;
+        }
         channel::get_members_bulk(self.pg()?, community_id, channel_ids).await
     }
 
@@ -1712,6 +1941,9 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_accessible_channel_ids(pool, community_id, pubkey).await;
+        }
         channel::get_accessible_channel_ids(self.pg()?, community_id, pubkey).await
     }
 
@@ -1721,6 +1953,9 @@ impl Db {
         community_id: CommunityId,
         visibility: Option<&str>,
     ) -> Result<Vec<channel::ChannelRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::list_channels(pool, community_id, visibility).await;
+        }
         channel::list_channels(self.pg()?, community_id, visibility).await
     }
 
@@ -1732,6 +1967,16 @@ impl Db {
         visibility_filter: Option<&str>,
         member_only: Option<bool>,
     ) -> Result<Vec<channel::AccessibleChannel>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_accessible_channels(
+                pool,
+                community_id,
+                pubkey,
+                visibility_filter,
+                member_only,
+            )
+            .await;
+        }
         channel::get_accessible_channels(
             self.pg()?,
             community_id,
@@ -1756,6 +2001,9 @@ impl Db {
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
     ) -> Result<Vec<channel::UserRecord>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_users_bulk(pool, community_id, pubkeys).await;
+        }
         channel::get_users_bulk(self.pg()?, community_id, pubkeys).await
     }
 
@@ -1766,6 +2014,9 @@ impl Db {
         channel_id: Uuid,
         updates: channel::ChannelUpdate,
     ) -> Result<channel::ChannelRecord> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::update_channel(pool, community_id, channel_id, updates).await;
+        }
         channel::update_channel(self.pg()?, community_id, channel_id, updates).await
     }
 
@@ -1777,6 +2028,9 @@ impl Db {
         topic: &str,
         set_by: &[u8],
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::set_topic(pool, community_id, channel_id, topic, set_by).await;
+        }
         channel::set_topic(self.pg()?, community_id, channel_id, topic, set_by).await
     }
 
@@ -1788,11 +2042,18 @@ impl Db {
         purpose: &str,
         set_by: &[u8],
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::set_purpose(pool, community_id, channel_id, purpose, set_by)
+                .await;
+        }
         channel::set_purpose(self.pg()?, community_id, channel_id, purpose, set_by).await
     }
 
     /// Archives a channel.
     pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::archive_channel(pool, community_id, channel_id).await;
+        }
         channel::archive_channel(self.pg()?, community_id, channel_id).await
     }
 
@@ -1802,6 +2063,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::unarchive_channel(pool, community_id, channel_id).await;
+        }
         channel::unarchive_channel(self.pg()?, community_id, channel_id).await
     }
 
@@ -1811,6 +2075,9 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::soft_delete_channel(pool, community_id, channel_id).await;
+        }
         channel::soft_delete_channel(self.pg()?, community_id, channel_id).await
     }
 
@@ -1839,6 +2106,9 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<Option<String>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::get_member_role(pool, community_id, channel_id, pubkey).await;
+        }
         channel::get_member_role(self.pg()?, community_id, channel_id, pubkey).await
     }
 
@@ -1846,6 +2116,9 @@ impl Db {
     pub async fn reap_expired_ephemeral_channels(
         &self,
     ) -> Result<Vec<channel::ReapedEphemeralChannel>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::channel::reap_expired_ephemeral_channels(pool).await;
+        }
         channel::reap_expired_ephemeral_channels(self.pg()?).await
     }
 
@@ -1855,6 +2128,9 @@ impl Db {
         now_secs: i64,
         batch_limit: i64,
     ) -> Result<Vec<event::DueReminder>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::query_due_reminders(pool, now_secs, batch_limit).await;
+        }
         event::query_due_reminders(self.pg()?, now_secs, batch_limit).await
     }
 
@@ -1865,6 +2141,15 @@ impl Db {
         event_id: &[u8],
         event_created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::claim_due_reminder(
+                pool,
+                community_id,
+                event_id,
+                event_created_at,
+            )
+            .await;
+        }
         event::claim_due_reminder(self.pg()?, community_id, event_id, event_created_at).await
     }
 
@@ -1876,6 +2161,16 @@ impl Db {
         event_created_at: chrono::DateTime<chrono::Utc>,
         delivery_stamp: i64,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::claim_due_reminder_with_stamp(
+                pool,
+                community_id,
+                event_id,
+                event_created_at,
+                delivery_stamp,
+            )
+            .await;
+        }
         event::claim_due_reminder_with_stamp(
             self.pg()?,
             community_id,
@@ -1894,6 +2189,16 @@ impl Db {
         event_created_at: chrono::DateTime<chrono::Utc>,
         delivery_stamp: i64,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::release_due_reminder(
+                pool,
+                community_id,
+                event_id,
+                event_created_at,
+                delivery_stamp,
+            )
+            .await;
+        }
         event::release_due_reminder(
             self.pg()?,
             community_id,
@@ -2945,6 +3250,9 @@ impl Db {
 
     /// Check if a pubkey is in the allowlist for `community`.
     pub async fn is_pubkey_allowed(&self, community: CommunityId, pubkey: &[u8]) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::is_pubkey_allowed(pool, community, pubkey).await;
+        }
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM pubkey_allowlist WHERE community_id = $1 AND pubkey = $2",
         )
@@ -2958,6 +3266,9 @@ impl Db {
 
     /// Check if the community allowlist has any entries (i.e. is enforcement active).
     pub async fn has_allowlist_entries(&self, community: CommunityId) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::has_allowlist_entries(pool, community).await;
+        }
         let row =
             sqlx::query("SELECT COUNT(*) as cnt FROM pubkey_allowlist WHERE community_id = $1")
                 .bind(community.as_uuid())
@@ -2975,6 +3286,12 @@ impl Db {
         added_by: &[u8],
         note: Option<&str>,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::add_to_allowlist(
+                pool, community, pubkey, added_by, note,
+            )
+            .await;
+        }
         let result = sqlx::query(
             "INSERT INTO pubkey_allowlist (community_id, pubkey, added_by, note) VALUES ($1, $2, $3, $4) \
              ON CONFLICT DO NOTHING",
@@ -2994,6 +3311,9 @@ impl Db {
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::remove_from_allowlist(pool, community, pubkey).await;
+        }
         let result =
             sqlx::query("DELETE FROM pubkey_allowlist WHERE community_id = $1 AND pubkey = $2")
                 .bind(community.as_uuid())
@@ -3005,6 +3325,9 @@ impl Db {
 
     /// List all pubkeys in the community allowlist.
     pub async fn list_allowlist(&self, community: CommunityId) -> Result<Vec<AllowlistEntry>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::list_allowlist(pool, community).await;
+        }
         let rows = sqlx::query(
             "SELECT pubkey, added_by, added_at, note FROM pubkey_allowlist WHERE community_id = $1 ORDER BY added_at DESC",
         )
@@ -3026,6 +3349,9 @@ impl Db {
 
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::is_relay_member(pool, community, pubkey).await;
+        }
         relay_members::is_relay_member(self.pg()?, community, pubkey).await
     }
 
@@ -3035,6 +3361,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<Option<relay_members::RelayMember>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::get_relay_member(pool, community, pubkey).await;
+        }
         relay_members::get_relay_member(self.pg()?, community, pubkey).await
     }
 
@@ -3043,6 +3372,9 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<Vec<relay_members::RelayMember>> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::list_relay_members(pool, community).await;
+        }
         relay_members::list_relay_members(self.pg()?, community).await
     }
 
@@ -3057,6 +3389,12 @@ impl Db {
         role: &str,
         added_by: Option<&str>,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::add_relay_member(
+                pool, community, pubkey, role, added_by,
+            )
+            .await;
+        }
         relay_members::add_relay_member(self.pg()?, community, pubkey, role, added_by).await
     }
 
@@ -3069,6 +3407,16 @@ impl Db {
         role: &str,
         policy_version: Option<&str>,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::claim_relay_membership(
+                pool,
+                community,
+                pubkey,
+                role,
+                policy_version,
+            )
+            .await;
+        }
         relay_members::claim_relay_membership(self.pg()?, community, pubkey, role, policy_version)
             .await
     }
@@ -3080,6 +3428,15 @@ impl Db {
         pubkey: &str,
         policy_version: &str,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::has_join_policy_acceptance(
+                pool,
+                community,
+                pubkey,
+                policy_version,
+            )
+            .await;
+        }
         relay_members::has_join_policy_acceptance(self.pg()?, community, pubkey, policy_version)
             .await
     }
@@ -3090,6 +3447,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<relay_members::RemoveResult> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::remove_relay_member(pool, community, pubkey).await;
+        }
         relay_members::remove_relay_member(self.pg()?, community, pubkey).await
     }
 
@@ -3103,6 +3463,15 @@ impl Db {
         pubkey: &str,
         expected_role: &str,
     ) -> Result<relay_members::RemoveResult> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::remove_relay_member_if_role(
+                pool,
+                community,
+                pubkey,
+                expected_role,
+            )
+            .await;
+        }
         relay_members::remove_relay_member_if_role(self.pg()?, community, pubkey, expected_role)
             .await
     }
@@ -3114,11 +3483,20 @@ impl Db {
         pubkey: &str,
         new_role: &str,
     ) -> Result<bool> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::update_relay_member_role(
+                pool, community, pubkey, new_role,
+            )
+            .await;
+        }
         relay_members::update_relay_member_role(self.pg()?, community, pubkey, new_role).await
     }
 
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
     pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::bootstrap_owner(pool, community, owner_pubkey).await;
+        }
         relay_members::bootstrap_owner(self.pg()?, community, owner_pubkey).await
     }
 
@@ -3132,6 +3510,15 @@ impl Db {
         new_owner_pubkey: &str,
         expected_owner_pubkey: &str,
     ) -> Result<relay_members::TransferResult> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::transfer_ownership(
+                pool,
+                community,
+                new_owner_pubkey,
+                expected_owner_pubkey,
+            )
+            .await;
+        }
         relay_members::transfer_ownership(
             self.pg()?,
             community,
@@ -3146,6 +3533,9 @@ impl Db {
     /// Idempotent — uses `ON CONFLICT DO NOTHING`. Returns the number of rows
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::relay_members::backfill_from_allowlist(pool, community).await;
+        }
         relay_members::backfill_from_allowlist(self.pg()?, community).await
     }
 
@@ -3405,6 +3795,15 @@ impl Db {
         channel_id: Uuid,
         relay_pubkey: &[u8],
     ) -> Result<u64> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::soft_delete_discovery_events(
+                pool,
+                community_id,
+                channel_id,
+                relay_pubkey,
+            )
+            .await;
+        }
         let result = sqlx::query(
             "UPDATE events SET deleted_at = NOW() \
              WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND deleted_at IS NULL AND kind IN (39000, 39001, 39002)",
@@ -3430,6 +3829,10 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::replace_addressable_event(pool, community_id, event, channel_id)
+                .await;
+        }
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
@@ -3611,6 +4014,14 @@ impl Db {
         community_id: CommunityId,
         relay_keypair: &nostr::Keys,
     ) -> Result<(StoredEvent, bool, usize)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::publish_nip43_membership_locked(
+                pool,
+                community_id,
+                relay_keypair,
+            )
+            .await;
+        }
         use nostr::{EventBuilder, Kind, Tag};
 
         let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
@@ -3753,6 +4164,16 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        if let DbBackend::Sqlite { pool } = &self.backend {
+            return sqlite::event::replace_parameterized_event(
+                pool,
+                community_id,
+                event,
+                d_tag,
+                channel_id,
+            )
+            .await;
+        }
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;

@@ -1358,12 +1358,30 @@ pub enum CommandEventPersist {
 /// Dropping the guard rolls back the event insert; call
 /// [`CommandEventTx::commit`] once the command's domain mutation has
 /// succeeded so the event record and mutation land together.
-pub struct CommandEventTx(Transaction<'static, Postgres>);
+pub struct CommandEventTx(CommandTxInner);
+
+/// Backend-neutral transaction holder: the guard's public shape is identical
+/// on both engines; only the wrapped transaction type differs.
+enum CommandTxInner {
+    Pg(Transaction<'static, Postgres>),
+    Sqlite(crate::sqlite::event::SqliteCommandEventTx),
+}
 
 impl CommandEventTx {
+    pub(crate) fn from_pg(tx: Transaction<'static, Postgres>) -> Self {
+        Self(CommandTxInner::Pg(tx))
+    }
+
+    pub(crate) fn from_sqlite(tx: crate::sqlite::event::SqliteCommandEventTx) -> Self {
+        Self(CommandTxInner::Sqlite(tx))
+    }
+
     /// Commit the guarded event insert.
     pub async fn commit(self) -> Result<()> {
-        self.0.commit().await.map_err(DbError::from)
+        match self.0 {
+            CommandTxInner::Pg(tx) => tx.commit().await.map_err(DbError::from),
+            CommandTxInner::Sqlite(tx) => tx.commit().await,
+        }
     }
 }
 
@@ -1485,7 +1503,7 @@ pub(crate) async fn persist_command_event(
         // Duplicate — rollback (implicit on drop) and signal idempotent success.
         Ok(CommandEventPersist::Duplicate)
     } else {
-        Ok(CommandEventPersist::Inserted(CommandEventTx(tx)))
+        Ok(CommandEventPersist::Inserted(CommandEventTx::from_pg(tx)))
     }
 }
 

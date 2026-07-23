@@ -15,7 +15,6 @@
 //! serializes the whole read-verify-write sequence — concurrent transfers or
 //! transfer-vs-create races cannot interleave, which is all the advisory
 //! lock bought on Postgres.
-#![allow(dead_code)] // Called via the Db backend-dispatch seam (orchestrator-owned lib.rs); allow until every arm is wired.
 
 use sqlx::{Row, SqlitePool};
 

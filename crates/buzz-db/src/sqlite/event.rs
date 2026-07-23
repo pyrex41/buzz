@@ -23,7 +23,6 @@
 //! `pg_advisory_xact_lock`, this arm uses a plain `BEGIN IMMEDIATE`
 //! transaction — SQLite has a single global writer, so taking the write
 //! lock up front serializes the whole read-check-write cycle end-to-end.
-#![allow(dead_code)] // Called via the Db backend-dispatch seam (orchestrator-owned lib.rs); allow until every arm is wired.
 
 use std::collections::HashMap;
 

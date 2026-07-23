@@ -84,3 +84,116 @@ mod tests {
         assert_eq!(fts, 1, "events_fts virtual table must exist");
     }
 }
+
+#[cfg(test)]
+mod db_surface_tests {
+    //! End-to-end serve-path flow through the PUBLIC `Db` surface on the
+    //! SQLite backend — proves the dispatch seam, not just the arms.
+
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind};
+
+    use crate::{Db, EventQuery};
+    use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+
+    fn temp_db_path() -> String {
+        std::env::temp_dir()
+            .join(format!("buzz-sqlite-e2e-{}.db", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[tokio::test]
+    async fn solo_serve_path_flow_via_public_db_surface() {
+        let path = temp_db_path();
+        let db = Db::new_sqlite(&path).await.expect("open sqlite db");
+        db.migrate().await.expect("migrate");
+
+        // Tenant bootstrap: host → community, idempotent.
+        let ensured = db
+            .ensure_configured_community("solo.example")
+            .await
+            .expect("ensure community");
+        assert!(ensured.created, "first ensure must create the community");
+        let again = db
+            .ensure_configured_community("solo.example")
+            .await
+            .expect("ensure community again");
+        assert!(!again.created, "second ensure must be idempotent");
+        assert_eq!(ensured.id, again.id);
+        let community = ensured.id;
+
+        // Channel + membership.
+        let keys = Keys::generate();
+        let author = keys.public_key().to_bytes().to_vec();
+        let channel = db
+            .create_channel(
+                community,
+                "general",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                Some("solo smoke channel"),
+                &author,
+                None,
+            )
+            .await
+            .expect("create channel");
+        // The creator is auto-added with an elevated role by create_channel;
+        // a second member joins at the base role (elevated grants require an
+        // elevated inviter — guard ported faithfully from Postgres).
+        let member = Keys::generate().public_key().to_bytes().to_vec();
+        db.add_member(
+            community,
+            channel.id,
+            &member,
+            MemberRole::Member,
+            Some(&author),
+        )
+        .await
+        .expect("add member");
+        for pubkey in [&author, &member] {
+            assert!(db
+                .is_member(community, channel.id, pubkey)
+                .await
+                .expect("is_member"));
+        }
+
+        // Event insert + channel-scoped query round trip.
+        let event = EventBuilder::new(Kind::Custom(9), "hello from sqlite")
+            .tags([nostr::Tag::parse(["h", &channel.id.to_string()]).expect("h tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let (stored, inserted) = db
+            .insert_event(community, &event, Some(channel.id))
+            .await
+            .expect("insert event");
+        assert!(inserted, "fresh event must insert");
+        assert_eq!(stored.event.id, event.id);
+
+        let mut q = EventQuery::for_community(community);
+        q.channel_id = Some(channel.id);
+        q.kinds = Some(vec![9]);
+        let results = db.query_events(&q).await.expect("query events");
+        assert_eq!(results.len(), 1, "channel-scoped query must find the event");
+        assert_eq!(results[0].event.as_json(), event.as_json());
+
+        // Duplicate insert is idempotent; count agrees.
+        let (_, second) = db
+            .insert_event(community, &event, Some(channel.id))
+            .await
+            .expect("re-insert event");
+        assert!(!second, "duplicate insert must be a no-op");
+        assert_eq!(db.count_events(&q).await.expect("count"), 1);
+
+        // A pg-only method fails closed with the typed error, not a panic.
+        let err = db
+            .ensure_future_partitions(1)
+            .await
+            .expect_err("pg-only method must refuse on sqlite");
+        assert!(
+            matches!(err, crate::DbError::UnsupportedBackend(_)),
+            "expected UnsupportedBackend, got {err:?}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
