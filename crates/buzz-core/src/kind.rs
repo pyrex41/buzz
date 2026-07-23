@@ -445,7 +445,25 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
-// User groups (47000–47999)
+// Workstream events (47000–47099) — reserved by the Hive implementation plan
+// (docs/hive-implementation-plan.md §5.1). Append-only history and review
+// events for the Workstream model; relay handling lands in Phase 3.
+/// A task's status changed (`a`-tag → the task's addressable coordinate).
+pub const KIND_TASK_STATUS_CHANGE: u32 = 47001;
+/// A new immutable version of an artifact (`a`-tag → artifact head).
+pub const KIND_ARTIFACT_VERSION: u32 = 47002;
+/// Request review of any artifact/task/decision — generic, not git-specific.
+pub const KIND_REVIEW_REQUEST: u32 = 47010;
+/// A comment within a review thread (NIP-10 threading).
+pub const KIND_REVIEW_COMMENT: u32 = 47011;
+/// A review verdict: approve / request-changes / reject.
+pub const KIND_REVIEW_DECISION: u32 = 47012;
+/// A free-form structured experiment log entry (`a`-tag → workstream).
+pub const KIND_EXPERIMENT_LOG: u32 = 47020;
+/// A single measurement (unit/value/series tags) for hardware & data work.
+pub const KIND_MEASUREMENT: u32 = 47021;
+/// A cross-functional handoff: from-`p`, to-`p`, checklist payload.
+pub const KIND_HANDOFF: u32 = 47030;
 
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
@@ -464,6 +482,20 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 // Media (49000–49999)
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
+
+// Workstream containers (35000–35199, parameterized replaceable) — reserved
+// by the Hive implementation plan (docs/hive-implementation-plan.md §5.1).
+// Addressable heads for the Workstream model; relay handling lands in Phase 3.
+/// A workstream — the primary work container (d-tag = workstream id;
+/// `ws-type` tag selects code/systems/hardware/data/design/process/docs/general).
+pub const KIND_WORKSTREAM: u32 = 35000;
+/// A task within a workstream (d-tag = task id, `a`-tag → workstream; LWW head).
+pub const KIND_WORKSTREAM_TASK: u32 = 35001;
+/// An artifact head: document, design, dataset, measurement set, BOM,
+/// simulation result… (d-tag = artifact id; versions are kind 47002 events).
+pub const KIND_ARTIFACT: u32 = 35002;
+/// A lightweight decision record (ADR-style, not code-specific; d-tag = id).
+pub const KIND_DECISION_RECORD: u32 = 35003;
 
 /// NIP-34: Repository announcement (parameterized replaceable, d-tag = repo-id).
 pub const KIND_GIT_REPO_ANNOUNCEMENT: u32 = 30617;
@@ -615,6 +647,18 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_MERGED,
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
+    KIND_WORKSTREAM,
+    KIND_WORKSTREAM_TASK,
+    KIND_ARTIFACT,
+    KIND_DECISION_RECORD,
+    KIND_TASK_STATUS_CHANGE,
+    KIND_ARTIFACT_VERSION,
+    KIND_REVIEW_REQUEST,
+    KIND_REVIEW_COMMENT,
+    KIND_REVIEW_DECISION,
+    KIND_EXPERIMENT_LOG,
+    KIND_MEASUREMENT,
+    KIND_HANDOFF,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
