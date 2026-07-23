@@ -7,7 +7,6 @@
 
 // TODO(dispatch): remove once the `Db` facade (lib.rs) wires these arms —
 // until then nothing outside this module calls them.
-#![allow(dead_code)]
 
 use sqlx::{Row as _, SqlitePool};
 

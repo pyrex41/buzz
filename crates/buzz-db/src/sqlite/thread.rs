@@ -33,7 +33,6 @@
 //! instead of a `ROW_NUMBER()` window over grouped aggregates.
 
 // TODO(orchestrator): drop this allow when `Db` dispatch wires these arms.
-#![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};

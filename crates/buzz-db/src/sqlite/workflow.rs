@@ -31,7 +31,6 @@
 
 // TODO(dispatch): remove once the `Db` facade (lib.rs) wires these arms —
 // until then nothing outside this module calls them.
-#![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};

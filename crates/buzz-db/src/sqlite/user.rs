@@ -23,7 +23,6 @@
 //! (the `::channel_add_policy` cast is dropped).
 
 // TODO(orchestrator): drop this allow when `Db` dispatch wires these arms.
-#![allow(dead_code)]
 
 use sqlx::{Row, SqlitePool};
 
