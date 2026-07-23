@@ -36,6 +36,8 @@ pub mod presence;
 pub mod publisher;
 /// Redis-backed rate limiter (fixed-window INCR + EXPIRE).
 pub mod rate_limiter;
+/// Redis implementation of the `buzz-state-api` SharedState contract.
+pub mod shared_state;
 /// Redis SUBSCRIBE for channel event delivery.
 pub mod subscriber;
 /// Community-scoped Redis event topics.

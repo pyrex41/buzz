@@ -7,6 +7,8 @@ members = [
     "crates/buzz-db",
     "crates/buzz-pubsub",
     "crates/buzz-messaging-api",
+    "crates/buzz-messaging-inproc",
+    "crates/buzz-state",
     "crates/buzz-state-api",
     "crates/buzz-storage-api",
     "crates/buzz-auth",
@@ -130,6 +132,8 @@ buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-messaging-api = { path = "crates/buzz-messaging-api" }
+buzz-messaging-inproc = { path = "crates/buzz-messaging-inproc" }
+buzz-state = { path = "crates/buzz-state" }
 buzz-state-api = { path = "crates/buzz-state-api" }
 buzz-storage-api = { path = "crates/buzz-storage-api" }
 buzz-search = { path = "crates/buzz-search" }

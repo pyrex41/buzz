@@ -1,0 +1,17 @@
+[package]
+name = "buzz-messaging-inproc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-process PubSub backend for single-node Buzz relays (zero external services)"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-messaging-api = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

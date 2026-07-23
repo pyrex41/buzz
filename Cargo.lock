@@ -1031,6 +1031,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-messaging-inproc"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-messaging-api",
+ "nostr",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
@@ -1082,6 +1093,7 @@ dependencies = [
  "buzz-auth",
  "buzz-core",
  "buzz-messaging-api",
+ "buzz-state-api",
  "chrono",
  "deadpool-redis",
  "futures-util",
@@ -1238,6 +1250,20 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-state"
+version = "0.1.0"
+dependencies = [
+ "buzz-auth",
+ "buzz-core",
+ "buzz-state-api",
+ "dashmap",
+ "nostr",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
