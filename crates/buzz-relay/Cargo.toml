@@ -23,6 +23,7 @@ buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-messaging-api = { workspace = true }
 buzz-messaging-inproc = { workspace = true }
+buzz-messaging-zmq = { workspace = true }
 buzz-state = { workspace = true }
 buzz-state-api = { workspace = true }
 buzz-audit = { workspace = true }

@@ -89,12 +89,59 @@ impl RelayBackends {
         }
     }
 
-    /// Build the backends selected by `config.messaging_backend`.
+    /// Build the backends selected by `config.messaging_backend` and
+    /// `config.state_backend`. A Redis pool is created only when some
+    /// selected backend (or the mesh) needs one.
     pub async fn from_config(config: &Config) -> anyhow::Result<Self> {
-        match config.messaging_backend {
-            crate::config::MessagingBackend::Redis => Self::redis(&config.redis_url).await,
-            crate::config::MessagingBackend::InProcess => Ok(Self::in_process()),
-        }
+        use crate::config::{MessagingBackend, StateBackend};
+
+        let make_pool = || {
+            deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))
+        };
+
+        let mut redis_pool: Option<deadpool_redis::Pool> = None;
+
+        let pubsub: Arc<dyn PubSub> = match config.messaging_backend {
+            MessagingBackend::Redis => {
+                let pool = make_pool()?;
+                redis_pool = Some(pool.clone());
+                Arc::new(
+                    PubSubManager::new(&config.redis_url, pool)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+                )
+            }
+            MessagingBackend::InProcess => Arc::new(buzz_messaging_inproc::InProcessPubSub::new()),
+            MessagingBackend::Zmq => Arc::new(buzz_messaging_zmq::ZmqPubSub::new(
+                buzz_messaging_zmq::ZmqTransportConfig {
+                    bind: config.zmq_bind.clone(),
+                    peers: config.zmq_peers.clone(),
+                },
+            )),
+        };
+
+        let shared_state: Arc<dyn SharedState> = match config.state_backend {
+            StateBackend::Redis => {
+                let pool = match &redis_pool {
+                    Some(pool) => pool.clone(),
+                    None => {
+                        let pool = make_pool()?;
+                        redis_pool = Some(pool.clone());
+                        pool
+                    }
+                };
+                Arc::new(RedisSharedState::new(pool))
+            }
+            StateBackend::InProcess => Arc::new(buzz_state::InProcessSharedState::new()),
+        };
+
+        Ok(Self {
+            pubsub,
+            shared_state,
+            redis_pool,
+        })
     }
 }
 

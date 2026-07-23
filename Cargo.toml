@@ -8,6 +8,8 @@ members = [
     "crates/buzz-pubsub",
     "crates/buzz-messaging-api",
     "crates/buzz-messaging-inproc",
+    "crates/buzz-messaging-zmq",
+    "crates/buzz-backend-conformance",
     "crates/buzz-state",
     "crates/buzz-state-api",
     "crates/buzz-storage-api",
@@ -107,6 +109,10 @@ rand = "0.10"
 subtle = "2.6"
 zeroize = "1.8"
 
+# ZeroMQ transport (pure-Rust implementation)
+zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime", "tcp-transport", "ipc-transport"] }
+bytes = "1"
+
 # Concurrent data structures
 dashmap = "6"
 moka    = { version = "0.12", features = ["sync"] }
@@ -133,6 +139,8 @@ buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-messaging-api = { path = "crates/buzz-messaging-api" }
 buzz-messaging-inproc = { path = "crates/buzz-messaging-inproc" }
+buzz-messaging-zmq = { path = "crates/buzz-messaging-zmq" }
+buzz-backend-conformance = { path = "crates/buzz-backend-conformance" }
 buzz-state = { path = "crates/buzz-state" }
 buzz-state-api = { path = "crates/buzz-state-api" }
 buzz-storage-api = { path = "crates/buzz-storage-api" }

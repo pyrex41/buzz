@@ -25,4 +25,5 @@ nostr = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+buzz-backend-conformance = { workspace = true }
 tokio = { workspace = true }

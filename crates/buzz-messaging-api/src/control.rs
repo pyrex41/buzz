@@ -4,9 +4,63 @@
 //! is carried by the `Scoped*` wrappers on the subscribe side, never by the
 //! tenant-local operation itself — publish paths take a `TenantContext`.
 
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, TenantContext};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::topic::BUZZ_PREFIX;
+
+/// Tenant-local topic suffix for cache-invalidation messages.
+pub const CACHE_INVALIDATION_SUFFIX: &str = "cache-invalidate";
+
+/// Pattern used by subscribers to receive cache invalidations for all
+/// communities this pod may have cached locally.
+pub const CACHE_INVALIDATION_PATTERN: &str = "buzz:*:cache-invalidate";
+
+/// Tenant-local topic suffix for connection-control messages.
+pub const CONN_CONTROL_SUFFIX: &str = "conn-control";
+
+/// Pattern subscribers use to receive connection-control messages for every
+/// community this pod may hold connections for.
+pub const CONN_CONTROL_PATTERN: &str = "buzz:*:conn-control";
+
+/// Wire topic for cache-invalidation messages under `ctx`.
+pub fn cache_invalidation_channel(ctx: &TenantContext) -> String {
+    format!(
+        "{BUZZ_PREFIX}:{}:{CACHE_INVALIDATION_SUFFIX}",
+        ctx.community()
+    )
+}
+
+/// Parse a cache-invalidation wire topic into its scoped community id.
+pub fn parse_cache_invalidation_channel(channel: &str) -> Option<CommunityId> {
+    parse_control_channel(channel, CACHE_INVALIDATION_SUFFIX)
+}
+
+/// Wire topic for connection-control messages under `ctx`.
+pub fn conn_control_channel(ctx: &TenantContext) -> String {
+    format!("{BUZZ_PREFIX}:{}:{CONN_CONTROL_SUFFIX}", ctx.community())
+}
+
+/// Parse a connection-control wire topic into its scoped community id.
+pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
+    parse_control_channel(channel, CONN_CONTROL_SUFFIX)
+}
+
+fn parse_control_channel(channel: &str, suffix: &str) -> Option<CommunityId> {
+    let mut parts = channel.split(':');
+    if parts.next()? != BUZZ_PREFIX {
+        return None;
+    }
+    let community_id = Uuid::parse_str(parts.next()?).ok()?;
+    if parts.next()? != suffix {
+        return None;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(CommunityId::from_uuid(community_id))
+}
 
 /// A cache-key drop to apply on every pod. Each variant mirrors exactly one of
 /// the relay's local `invalidate_*` operations. The community is carried by

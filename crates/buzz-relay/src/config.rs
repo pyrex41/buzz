@@ -24,14 +24,28 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
-/// Which messaging + shared-state backend the relay runs on.
+/// Which messaging transport the relay runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessagingBackend {
-    /// Redis pub/sub + Redis shared state (multi-pod capable; the default).
+    /// Redis pub/sub (multi-pod capable; the default).
     Redis,
-    /// In-process fan-out + in-process shared state (single node, zero
-    /// external services). Rejected when the mesh is enabled: replay
-    /// protection and rate limits must be shared across pods.
+    /// In-process fan-out (single node, zero external services). Rejected
+    /// when the mesh is enabled.
+    InProcess,
+    /// ZeroMQ static-mesh transport (`BUZZ_ZMQ_BIND` + `BUZZ_ZMQ_PEERS`).
+    /// Experimental; multi-node ZMQ requires `BUZZ_STATE_BACKEND=redis`.
+    Zmq,
+}
+
+/// Which shared-state backend (presence, rate limits, NIP-98 replay) the
+/// relay runs on. Defaults follow the messaging backend; with ZMQ peers
+/// configured the choice must be explicit and shared (Redis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateBackend {
+    /// Redis TTL-KV + atomic counters (multi-pod capable).
+    Redis,
+    /// In-process store — single node only; the replay guard and rate
+    /// limiter are correctness fences that must be shared across pods.
     InProcess,
 }
 
@@ -71,10 +85,19 @@ pub struct Config {
     pub redis_url: String,
     /// Messaging + shared-state backend selection (`BUZZ_MESSAGING_BACKEND`).
     ///
-    /// `redis` (default) keeps today's behavior; `inproc` runs fan-out,
-    /// presence, rate limiting, and the NIP-98 replay guard in-process —
-    /// single-node only (ADR 0001) and mutually exclusive with `BUZZ_MESH=on`.
+    /// `redis` (default) keeps today's behavior; `inproc` runs fan-out
+    /// in-process (single node, ADR 0001); `zmq` uses the static-mesh
+    /// ZeroMQ transport. Non-Redis backends are mutually exclusive with
+    /// `BUZZ_MESH=on`.
     pub messaging_backend: MessagingBackend,
+    /// Shared-state backend (`BUZZ_STATE_BACKEND`): presence, rate limits,
+    /// and NIP-98 replay. Defaults follow `messaging_backend`.
+    pub state_backend: StateBackend,
+    /// ZMQ PUB bind endpoint (`BUZZ_ZMQ_BIND`, default `tcp://0.0.0.0:5559`).
+    pub zmq_bind: String,
+    /// ZMQ peer PUB endpoints (`BUZZ_ZMQ_PEERS`, comma-separated; must not
+    /// include this node's own endpoint).
+    pub zmq_peers: Vec<String>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -527,16 +550,63 @@ impl Config {
         {
             "redis" => MessagingBackend::Redis,
             "inproc" | "in-process" | "inprocess" => MessagingBackend::InProcess,
+            "zmq" | "zeromq" => MessagingBackend::Zmq,
             other => {
                 return Err(ConfigError::InvalidValue(format!(
-                    "BUZZ_MESSAGING_BACKEND must be 'redis' or 'inproc', got '{other}'"
+                    "BUZZ_MESSAGING_BACKEND must be 'redis', 'inproc', or 'zmq', got '{other}'"
                 )))
             }
         };
-        if messaging_backend == MessagingBackend::InProcess && mesh.enabled {
+        if messaging_backend != MessagingBackend::Redis && mesh.enabled {
             return Err(ConfigError::InvalidValue(
                 "BUZZ_MESH=on requires BUZZ_MESSAGING_BACKEND=redis: mesh session fencing \
                  and cross-pod replay/rate-limit state need a shared Redis"
+                    .to_string(),
+            ));
+        }
+
+        let zmq_bind =
+            std::env::var("BUZZ_ZMQ_BIND").unwrap_or_else(|_| "tcp://0.0.0.0:5559".to_string());
+        let zmq_peers: Vec<String> = std::env::var("BUZZ_ZMQ_PEERS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        // Shared-state backend. Defaults follow the messaging backend; a
+        // multi-node ZMQ mesh must state its choice explicitly because the
+        // replay guard and rate limiter are cross-pod correctness fences.
+        let state_backend = match std::env::var("BUZZ_STATE_BACKEND") {
+            Ok(raw) => match raw.to_ascii_lowercase().as_str() {
+                "redis" => StateBackend::Redis,
+                "inproc" | "in-process" | "inprocess" => StateBackend::InProcess,
+                other => {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_STATE_BACKEND must be 'redis' or 'inproc', got '{other}'"
+                    )))
+                }
+            },
+            Err(_) => match messaging_backend {
+                MessagingBackend::Redis => StateBackend::Redis,
+                MessagingBackend::InProcess => StateBackend::InProcess,
+                MessagingBackend::Zmq if zmq_peers.is_empty() => StateBackend::InProcess,
+                MessagingBackend::Zmq => {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_ZMQ_PEERS is set: choose BUZZ_STATE_BACKEND explicitly \
+                         (multi-node replay/rate-limit fences need shared state — \
+                         'redis' is the safe choice)"
+                            .to_string(),
+                    ))
+                }
+            },
+        };
+        if state_backend == StateBackend::InProcess && !zmq_peers.is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_STATE_BACKEND=inproc is single-node only: with BUZZ_ZMQ_PEERS \
+                 configured, replay protection and rate limits would not be shared \
+                 across nodes — use BUZZ_STATE_BACKEND=redis"
                     .to_string(),
             ));
         }
@@ -905,6 +975,9 @@ impl Config {
             read_database_url,
             redis_url,
             messaging_backend,
+            state_backend,
+            zmq_bind,
+            zmq_peers,
             relay_url,
             pairing_relay_url,
             max_connections,

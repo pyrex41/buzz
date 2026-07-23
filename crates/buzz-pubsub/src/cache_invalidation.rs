@@ -11,45 +11,13 @@
 //! universal delivery-enforcement point, so dropping the stale key is
 //! sufficient: the next read re-fetches authoritative state from the DB.
 
-use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
-pub use buzz_messaging_api::control::{CacheInvalidation, ScopedCacheInvalidation};
-
-use crate::topic::BUZZ_PREFIX;
-
-/// Tenant-local Redis pub/sub channel suffix for cache-invalidation messages.
-pub const CACHE_INVALIDATION_SUFFIX: &str = "cache-invalidate";
-
-/// Pattern used by the subscriber to receive cache invalidations for all
-/// communities this pod may have cached locally.
-pub const CACHE_INVALIDATION_PATTERN: &str = "buzz:*:cache-invalidate";
-
-/// Redis pub/sub channel for cache-invalidation messages under `ctx`.
-pub fn cache_invalidation_channel(ctx: &TenantContext) -> String {
-    format!(
-        "{BUZZ_PREFIX}:{}:{CACHE_INVALIDATION_SUFFIX}",
-        ctx.community()
-    )
-}
-
-/// Parse a cache-invalidation Redis channel into its scoped community id.
-pub fn parse_cache_invalidation_channel(channel: &str) -> Option<CommunityId> {
-    let mut parts = channel.split(':');
-    if parts.next()? != BUZZ_PREFIX {
-        return None;
-    }
-    let community_id = Uuid::parse_str(parts.next()?).ok()?;
-    if parts.next()? != CACHE_INVALIDATION_SUFFIX {
-        return None;
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(CommunityId::from_uuid(community_id))
-}
+pub use buzz_messaging_api::control::{
+    cache_invalidation_channel, parse_cache_invalidation_channel, CacheInvalidation,
+    ScopedCacheInvalidation, CACHE_INVALIDATION_PATTERN, CACHE_INVALIDATION_SUFFIX,
+};
 
 /// Initial reconnect backoff (1 second).
 const BACKOFF_INITIAL_SECS: u64 = 1;
@@ -142,6 +110,8 @@ async fn connect_and_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::{CommunityId, TenantContext};
+    use uuid::Uuid;
 
     fn ctx(id: u128, host: &str) -> TenantContext {
         TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), host)
