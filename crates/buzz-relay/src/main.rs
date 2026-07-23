@@ -142,20 +142,41 @@ async fn main() -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
-    let db_config = DbConfig {
-        database_url: config.database_url.clone(),
-        read_database_url: config.read_database_url.clone(),
-        ..DbConfig::default()
+    let db = match config.db_backend {
+        buzz_relay::config::DbBackendKind::Postgres => {
+            let db_config = DbConfig {
+                database_url: config.database_url.clone(),
+                read_database_url: config.read_database_url.clone(),
+                ..DbConfig::default()
+            };
+            let db = Db::new(&db_config).await.map_err(|e| {
+                error!("Failed to connect to Postgres: {e}");
+                anyhow::anyhow!("DB connection failed: {e}")
+            })?;
+            if db.has_read_pool() {
+                info!("Postgres connected (writer + read replica)");
+            } else {
+                info!("Postgres connected");
+            }
+            db
+        }
+        buzz_relay::config::DbBackendKind::Sqlite => {
+            if let Some(parent) = std::path::Path::new(&config.sqlite_path).parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("create sqlite data dir: {e}"))?;
+            }
+            let db = Db::new_sqlite(&config.sqlite_path).await.map_err(|e| {
+                error!("Failed to open SQLite database: {e}");
+                anyhow::anyhow!("DB open failed: {e}")
+            })?;
+            info!(path = %config.sqlite_path, "SQLite database open");
+            db
+        }
     };
-    let db = Db::new(&db_config).await.map_err(|e| {
-        error!("Failed to connect to Postgres: {e}");
-        anyhow::anyhow!("DB connection failed: {e}")
-    })?;
-    if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
-    } else {
-        info!("Postgres connected");
-    }
+    let db_is_postgres = matches!(
+        config.db_backend,
+        buzz_relay::config::DbBackendKind::Postgres
+    );
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
@@ -169,8 +190,10 @@ async fn main() -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
-    if let Err(e) = db.ensure_future_partitions(3).await {
-        error!("Failed to ensure partitions: {e}");
+    if db_is_postgres {
+        if let Err(e) = db.ensure_future_partitions(3).await {
+            error!("Failed to ensure partitions: {e}");
+        }
     }
 
     // Freshness fence probe: cursor pages route to the replica only for
@@ -312,13 +335,23 @@ async fn main() -> anyhow::Result<()> {
 
     // NIP-33: backfill d_tag for any existing parameterized replaceable events
     // that predate the column addition. Idempotent — no-ops when fully populated.
-    match db.backfill_d_tags().await {
-        Ok(0) => {}
-        Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
-        Err(e) => error!("Failed to backfill d_tags: {e}"),
+    if db_is_postgres {
+        match db.backfill_d_tags().await {
+            Ok(0) => {}
+            Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
+            Err(e) => error!("Failed to backfill d_tags: {e}"),
+        }
     }
 
-    let audit = if config.audit_enabled {
+    let audit = if config.audit_enabled && !db_is_postgres {
+        // The audit chain is Postgres-backed today (buzz-audit takes a
+        // PgPool); the SQLite audit arm is a Phase 2 follow-up.
+        tracing::warn!(
+            "BUZZ_AUDIT_ENABLED is on but the audit chain requires Postgres — \
+             audit logging disabled on the sqlite backend"
+        );
+        None
+    } else if config.audit_enabled {
         let audit_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .min_connections(1)
@@ -363,15 +396,30 @@ async fn main() -> anyhow::Result<()> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(search_db_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
-    let search = SearchService::new(search_pool);
-    info!(
-        replica = config.read_database_url.is_some(),
-        "Search service ready (Postgres FTS)"
-    );
+    let search = if db_is_postgres {
+        let search_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(search_db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+        info!(
+            replica = config.read_database_url.is_some(),
+            "Search service ready (Postgres FTS)"
+        );
+        SearchService::new(search_pool)
+    } else {
+        // SQLite profile: the FTS5 query path is a Phase 2 follow-up. A lazy
+        // pool never connects unless a NIP-50 search actually arrives, which
+        // then errors cleanly instead of failing boot.
+        tracing::warn!(
+            "NIP-50 search is not yet available on the sqlite backend — \
+             search requests will error until the FTS5 query path lands"
+        );
+        SearchService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy(&config.database_url)
+                .map_err(|e| anyhow::anyhow!("lazy search pool: {e}"))?,
+        )
+    };
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -677,12 +725,14 @@ async fn main() -> anyhow::Result<()> {
     // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
     // already disabled without the exact gateway URL, so discovery and runtime
     // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    if state.config.push_gateway_delivery_url.is_some() && db_is_postgres {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    } else if state.config.push_gateway_delivery_url.is_some() {
+        info!("NIP-PL push runtime disabled: push leases require the Postgres backend");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
@@ -995,7 +1045,7 @@ async fn main() -> anyhow::Result<()> {
     // Multi-pod semantics:
     //   DB-derived: all pods export the same value → dashboard uses max()
     //   In-memory:  each pod exports its partition → dashboard uses sum()
-    {
+    if db_is_postgres {
         let usage_state = Arc::clone(&state);
         let emission_scope = EmissionScope::from_env();
         let interval_secs = usage_interval_secs;

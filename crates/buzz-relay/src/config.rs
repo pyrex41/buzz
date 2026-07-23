@@ -24,6 +24,17 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Which storage engine backs `buzz-db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbBackendKind {
+    /// Postgres (the default; multi-pod capable, full feature set).
+    Postgres,
+    /// SQLite (single node, zero external services). Excludes the
+    /// Postgres-only subsystems: push gateway, read replicas, partitions,
+    /// usage-metrics leader election, audit, and Postgres FTS search.
+    Sqlite,
+}
+
 /// Which messaging transport the relay runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessagingBackend {
@@ -83,6 +94,10 @@ pub struct Config {
     pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Storage engine selection (`BUZZ_DB_BACKEND`: "postgres" | "sqlite").
+    pub db_backend: DbBackendKind,
+    /// SQLite database path (`BUZZ_SQLITE_PATH`), sqlite backend only.
+    pub sqlite_path: String,
     /// Messaging + shared-state backend selection (`BUZZ_MESSAGING_BACKEND`).
     ///
     /// `redis` (default) keeps today's behavior; `inproc` runs fan-out
@@ -449,6 +464,28 @@ impl Config {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        let db_backend = match std::env::var("BUZZ_DB_BACKEND")
+            .unwrap_or_else(|_| "postgres".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "postgres" | "pg" => DbBackendKind::Postgres,
+            "sqlite" => DbBackendKind::Sqlite,
+            other => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_DB_BACKEND must be 'postgres' or 'sqlite', got '{other}'"
+                )))
+            }
+        };
+        let sqlite_path =
+            std::env::var("BUZZ_SQLITE_PATH").unwrap_or_else(|_| "./data/buzz.db".to_string());
+        if db_backend == DbBackendKind::Sqlite && read_database_url.is_some() {
+            return Err(ConfigError::InvalidValue(
+                "READ_DATABASE_URL is Postgres-only: unset it with BUZZ_DB_BACKEND=sqlite"
+                    .to_string(),
+            ));
+        }
+
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
@@ -557,6 +594,13 @@ impl Config {
                 )))
             }
         };
+        if db_backend == DbBackendKind::Sqlite && mesh.enabled {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_MESH=on requires BUZZ_DB_BACKEND=postgres: the mesh is multi-node \
+                 and SQLite is single-node storage"
+                    .to_string(),
+            ));
+        }
         if messaging_backend != MessagingBackend::Redis && mesh.enabled {
             return Err(ConfigError::InvalidValue(
                 "BUZZ_MESH=on requires BUZZ_MESSAGING_BACKEND=redis: mesh session fencing \
@@ -990,6 +1034,8 @@ impl Config {
             database_url,
             read_database_url,
             redis_url,
+            db_backend,
+            sqlite_path,
             messaging_backend,
             state_backend,
             zmq_bind,
