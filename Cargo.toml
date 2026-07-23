@@ -56,8 +56,10 @@ tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 
 # Database
+# The `sqlite` driver backs buzz-db's Solo-profile backend; its bundled
+# libsqlite3 ships FTS5 + JSON1 (verified — see docs/phase2 worksheets).
 sqlx = { version = "0.9", features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
+    "runtime-tokio", "tls-rustls", "postgres", "sqlite", "uuid", "chrono", "json"
 ] }
 
 # Redis
