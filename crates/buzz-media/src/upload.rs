@@ -565,6 +565,8 @@ mod tests {
 
     fn test_config() -> MediaConfig {
         MediaConfig {
+            backend: crate::config::MediaBackendKind::S3,
+            local_path: "./data/media".to_string(),
             s3_endpoint: String::new(),
             s3_access_key: String::new(),
             s3_secret_key: String::new(),

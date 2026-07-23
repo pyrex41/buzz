@@ -12,9 +12,32 @@ fn default_s3_region() -> String {
     "us-east-1".to_string()
 }
 
-/// Configuration for media storage (S3/MinIO).
+fn default_local_path() -> String {
+    "./data/media".to_string()
+}
+
+/// Which storage backend media blobs live on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaBackendKind {
+    /// S3-compatible object storage (AWS S3, MinIO, R2, Garage). Default.
+    #[default]
+    S3,
+    /// Local filesystem under `local_path` — single node, zero services.
+    /// Key layout mirrors the S3 layout exactly (shared CAS blobs +
+    /// per-community `_meta/` sidecars).
+    Local,
+}
+
+/// Configuration for media storage (S3/MinIO or local filesystem).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MediaConfig {
+    /// Storage backend selection (`BUZZ_MEDIA_BACKEND`: "s3" | "local").
+    #[serde(default)]
+    pub backend: MediaBackendKind,
+    /// Root directory for the local backend (`BUZZ_MEDIA_PATH`).
+    #[serde(default = "default_local_path")]
+    pub local_path: String,
     /// S3-compatible endpoint URL (e.g. "http://localhost:9000").
     pub s3_endpoint: String,
     /// S3 access key.
@@ -127,6 +150,8 @@ mod tests {
 
     fn valid_config() -> MediaConfig {
         MediaConfig {
+            backend: crate::config::MediaBackendKind::S3,
+            local_path: "./data/media".to_string(),
             s3_endpoint: "http://localhost:9000".to_string(),
             s3_access_key: "k".to_string(),
             s3_secret_key: "s".to_string(),

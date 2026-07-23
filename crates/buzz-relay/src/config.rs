@@ -716,7 +716,23 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
+        let media_backend = match std::env::var("BUZZ_MEDIA_BACKEND")
+            .unwrap_or_else(|_| "s3".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "s3" => buzz_media::config::MediaBackendKind::S3,
+            "local" | "fs" | "localfs" => buzz_media::config::MediaBackendKind::Local,
+            other => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_MEDIA_BACKEND must be 's3' or 'local', got '{other}'"
+                )))
+            }
+        };
         let media = buzz_media::MediaConfig {
+            backend: media_backend,
+            local_path: std::env::var("BUZZ_MEDIA_PATH")
+                .unwrap_or_else(|_| "./data/media".to_string()),
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")

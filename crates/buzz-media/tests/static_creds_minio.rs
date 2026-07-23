@@ -22,6 +22,8 @@ use buzz_media::storage::MediaStorage;
 
 fn minio_config() -> MediaConfig {
     MediaConfig {
+        backend: buzz_media::config::MediaBackendKind::S3,
+        local_path: "./data/media".to_string(),
         s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string()),
         s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
