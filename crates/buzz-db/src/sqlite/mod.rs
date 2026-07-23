@@ -5,10 +5,21 @@
 //! lives in `schema.sql` (consolidated — no incremental migration lineage
 //! yet; per ADR 0001 the Postgres migrations are not shared).
 
+pub mod admin_moderation;
+pub mod archived_identities;
 pub mod channel;
 pub mod community;
+pub mod dm;
 pub mod event;
+pub mod feed;
+pub mod git_repo;
+pub mod moderation;
+pub mod product_feedback;
+pub mod reaction;
 pub mod relay_members;
+pub mod thread;
+pub mod user;
+pub mod workflow;
 
 use sqlx::SqlitePool;
 
