@@ -5,6 +5,11 @@
 //! lives in `schema.sql` (consolidated — no incremental migration lineage
 //! yet; per ADR 0001 the Postgres migrations are not shared).
 
+pub mod channel;
+pub mod community;
+pub mod event;
+pub mod relay_members;
+
 use sqlx::SqlitePool;
 
 use crate::error::Result;
