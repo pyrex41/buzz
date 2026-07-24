@@ -398,7 +398,14 @@ impl Db {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
+            // SQLite's busy handler polls rather than queueing FIFO, so under
+            // sustained write pressure (event insert + audit append + counter
+            // updates from many concurrent connections) an unlucky waiter can
+            // starve well past a small timeout and surface SQLITE_BUSY as a
+            // 500. Writes themselves are milliseconds; waiting longer is
+            // strictly better than failing — 30s matches the Postgres pool's
+            // acquire timeout order of magnitude.
+            .busy_timeout(Duration::from_secs(30));
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(options)
