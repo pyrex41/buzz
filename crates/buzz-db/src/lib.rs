@@ -398,21 +398,31 @@ impl Db {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .foreign_keys(true)
-            // SQLite's busy handler polls rather than queueing FIFO, so under
-            // sustained write pressure (event insert + audit append + counter
-            // updates from many concurrent connections) an unlucky waiter can
-            // starve well past a small timeout and surface SQLITE_BUSY as a
-            // 500. Writes themselves are milliseconds; waiting longer is
-            // strictly better than failing — 30s matches the Postgres pool's
-            // acquire timeout order of magnitude.
+            // The busy timeout only matters for contention with OTHER
+            // processes on the same file (e.g. the e2e seed helper): the
+            // relay itself never races the SQLite lock — see below.
             .busy_timeout(Duration::from_secs(30));
+        // ONE connection, on purpose. SQLite's busy handler polls rather than
+        // queueing FIFO, so N relay connections racing `BEGIN IMMEDIATE`
+        // under sustained write pressure (event insert + audit append +
+        // counter updates) starve unlucky waiters essentially unboundedly —
+        // observed as multi-minute stalls and SQLITE_BUSY 500s under the e2e
+        // suite. The sqlx pool's acquire queue IS fair, so serializing every
+        // relay-side statement through a single connection replaces that
+        // lottery with FIFO order. Statements are all short (no streaming
+        // reads held across awaits; verified — nothing acquires a second
+        // connection while holding one, which would self-deadlock here), and
+        // WAL commits in NORMAL mode are sub-millisecond, so a queue is
+        // cheap. This is the ADR 0001 stance made literal: on the Solo
+        // profile, SQLite's single writer replaces the concurrency machinery
+        // — including our own.
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(1)
             .connect_with(options)
             .await?;
         Ok(Self {
             backend: DbBackend::Sqlite { pool },
-            max_connections: 4,
+            max_connections: 1,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         })
     }
