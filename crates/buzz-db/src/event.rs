@@ -1364,7 +1364,7 @@ pub struct CommandEventTx(CommandTxInner);
 /// on both engines; only the wrapped transaction type differs.
 enum CommandTxInner {
     Pg(Transaction<'static, Postgres>),
-    Sqlite(crate::sqlite::event::SqliteCommandEventTx),
+    Sqlite(Box<crate::sqlite::event::SqliteCommandEventTx>),
 }
 
 impl CommandEventTx {
@@ -1372,7 +1372,7 @@ impl CommandEventTx {
         Self(CommandTxInner::Pg(tx))
     }
 
-    pub(crate) fn from_sqlite(tx: crate::sqlite::event::SqliteCommandEventTx) -> Self {
+    pub(crate) fn from_sqlite(tx: Box<crate::sqlite::event::SqliteCommandEventTx>) -> Self {
         Self(CommandTxInner::Sqlite(tx))
     }
 

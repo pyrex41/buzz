@@ -1517,7 +1517,7 @@ pub enum SqliteCommandEventPersist {
     Duplicate,
     /// Event inserted; the row is held in an open transaction. Commit the
     /// guard after the command's domain mutation succeeds.
-    Inserted(SqliteCommandEventTx),
+    Inserted(Box<SqliteCommandEventTx>),
 }
 
 /// Deferred command-event insert guarding a validated command event.
@@ -1698,19 +1698,21 @@ pub(crate) async fn persist_command_event(
         return Ok(SqliteCommandEventPersist::Duplicate);
     }
 
-    Ok(SqliteCommandEventPersist::Inserted(SqliteCommandEventTx {
-        pool: pool.clone(),
-        community,
-        id: event.id.as_bytes().to_vec(),
-        pubkey: pubkey_bytes.to_vec(),
-        created_at_secs,
-        kind_i32,
-        tags: tags_text(event)?,
-        content: event.content.clone(),
-        sig: event.sig.serialize().to_vec(),
-        channel_id,
-        d_tag,
-    }))
+    Ok(SqliteCommandEventPersist::Inserted(Box::new(
+        SqliteCommandEventTx {
+            pool: pool.clone(),
+            community,
+            id: event.id.as_bytes().to_vec(),
+            pubkey: pubkey_bytes.to_vec(),
+            created_at_secs,
+            kind_i32,
+            tags: tags_text(event)?,
+            content: event.content.clone(),
+            sig: event.sig.serialize().to_vec(),
+            channel_id,
+            d_tag,
+        },
+    )))
 }
 
 // ── NIP-ER reminders ────────────────────────────────────────────────────────
