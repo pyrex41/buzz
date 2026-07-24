@@ -24,6 +24,8 @@
 #   e2e_relay          relay WebSocket protocol + invites + membership
 #   e2e_nostr_interop  NIP-50 search (SQLite FTS5), NIP-10 threads, NIP-17
 #   e2e_media          Blossom upload/download on the local-FS media backend
+#   e2e_workstream     Hive Workstream kinds (35000-35003 NIP-33 heads +
+#                      47001-47030 append-only history)
 #
 # Not run here (documented gaps, not accidents):
 #   e2e_git            git-on-object-storage needs an S3-style backend; the
@@ -167,7 +169,7 @@ if [[ -n "${NEXTEST_ARCHIVE}" ]]; then
     DATABASE_URL="sqlite:${SOLO_DIR}/buzz.db" \
     cargo nextest run \
       --archive-file "${NEXTEST_ARCHIVE}" \
-      -E 'binary(e2e_relay) or binary(e2e_nostr_interop) or binary(e2e_media)' \
+      -E 'binary(e2e_relay) or binary(e2e_nostr_interop) or binary(e2e_media) or binary(e2e_workstream)' \
       --run-ignored ignored-only || test_status=$?
 else
   env \
@@ -178,6 +180,7 @@ else
       --test e2e_relay \
       --test e2e_nostr_interop \
       --test e2e_media \
+      --test e2e_workstream \
       -- --ignored || test_status=$?
 fi
 

@@ -296,6 +296,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_STATUS_MERGED
         | KIND_GIT_STATUS_CLOSED
         | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
+        // Hive Workstream family (35000–35003 heads, 47001–47030 history).
+        // These are channel-scoped work content, not admin state: the same
+        // scope a member needs to post a message is the scope they need to
+        // open a task or log a measurement. Authorization proper is the
+        // channel-membership gate every `h`-scoped kind goes through.
+        k if crate::handlers::workstream::is_workstream_kind(k) => Ok(Scope::MessagesWrite),
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
@@ -453,6 +459,13 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
 
 /// Kinds that require an `h` tag for channel scoping.
 pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
+    // Hive Workstream family: workstreams, tasks, artifacts, decision records
+    // and their append-only history all live inside a channel, so they carry
+    // the same NIP-29 `h` tag every other channel-scoped kind does and inherit
+    // the same membership gate and tenant isolation.
+    if crate::handlers::workstream::is_workstream_kind(kind) {
+        return true;
+    }
     matches!(
         kind,
         KIND_STREAM_MESSAGE
@@ -2025,6 +2038,15 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // Hive Workstream family (35000–35003, 47001–47030): tag-shape gate only.
+    // The 35xxx heads then fall through to the shared NIP-33 replace path
+    // below (`is_parameterized_replaceable`) — there is no Workstream-specific
+    // storage or LWW machinery.
+    if crate::handlers::workstream::is_workstream_kind(kind_u32) {
+        crate::handlers::workstream::validate_workstream_event(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -2585,6 +2607,48 @@ mod tests {
             assert!(
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
+            );
+        }
+    }
+
+    /// The Workstream family must be admissible at all (the scope match's
+    /// catch-all rejects unknown kinds) and must be channel-scoped.
+    #[test]
+    fn workstream_kinds_are_channel_scoped_message_writes() {
+        use buzz_core::kind::{
+            KIND_ARTIFACT, KIND_ARTIFACT_VERSION, KIND_DECISION_RECORD, KIND_EXPERIMENT_LOG,
+            KIND_HANDOFF, KIND_MEASUREMENT, KIND_REVIEW_COMMENT, KIND_REVIEW_DECISION,
+            KIND_REVIEW_REQUEST, KIND_TASK_STATUS_CHANGE, KIND_WORKSTREAM, KIND_WORKSTREAM_TASK,
+        };
+        let probe = EventBuilder::new(Kind::Custom(1), "")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign probe");
+        for kind in [
+            KIND_WORKSTREAM,
+            KIND_WORKSTREAM_TASK,
+            KIND_ARTIFACT,
+            KIND_DECISION_RECORD,
+            KIND_TASK_STATUS_CHANGE,
+            KIND_ARTIFACT_VERSION,
+            KIND_REVIEW_REQUEST,
+            KIND_REVIEW_COMMENT,
+            KIND_REVIEW_DECISION,
+            KIND_EXPERIMENT_LOG,
+            KIND_MEASUREMENT,
+            KIND_HANDOFF,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &probe),
+                Ok(Scope::MessagesWrite),
+                "kind {kind} must map to a real scope, not `unknown event kind`"
+            );
+            assert!(
+                requires_h_channel_scope(kind),
+                "kind {kind} should require an h tag"
+            );
+            assert!(
+                !is_global_only_kind(kind),
+                "kind {kind} must not be global-only"
             );
         }
     }

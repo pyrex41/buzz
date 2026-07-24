@@ -483,9 +483,20 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
 
-// Workstream containers (35000–35199, parameterized replaceable) — reserved
+// Workstream containers (35000–35199, parameterized replaceable) — allocated
 // by the Hive implementation plan (docs/hive-implementation-plan.md §5.1).
-// Addressable heads for the Workstream model; relay handling lands in Phase 3.
+//
+// These are the addressable heads of the Workstream model. Being inside
+// 30000–39999 they are NIP-33 parameterized-replaceable by
+// `is_parameterized_replaceable` alone, so the relay routes them through the
+// existing `replace_parameterized_event` last-write-wins path — there is no
+// Workstream-specific storage or replace machinery, and a stale write reports
+// the usual `duplicate:` conflict. The only Workstream-specific relay code is
+// a tag-shape gate at ingest (`buzz-relay/src/handlers/workstream.rs`), which
+// requires the `d` identifier, the `a` coordinates linking the family
+// together, and the NIP-29 `h` channel tag. References are format-validated
+// but never resolved: clients compose offline, so a task may legitimately
+// arrive before its workstream.
 /// A workstream — the primary work container (d-tag = workstream id;
 /// `ws-type` tag selects code/systems/hardware/data/design/process/docs/general).
 pub const KIND_WORKSTREAM: u32 = 35000;
@@ -757,6 +768,17 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
+
+// Compile-time: the Workstream heads are addressable and their append-only
+// history is not. This is the whole reason the relay needs no Workstream
+// LWW machinery — the range predicate already routes 35xxx to
+// `replace_parameterized_event`.
+const _: () = assert!(is_parameterized_replaceable(KIND_WORKSTREAM)); // 35000 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_WORKSTREAM_TASK)); // 35001 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_ARTIFACT)); // 35002 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_DECISION_RECORD)); // 35003 ∈ 30000–39999
+const _: () = assert!(!is_parameterized_replaceable(KIND_TASK_STATUS_CHANGE)); // 47001: append-only
+const _: () = assert!(!is_parameterized_replaceable(KIND_HANDOFF)); // 47030: append-only
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

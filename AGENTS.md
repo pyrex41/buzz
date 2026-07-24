@@ -208,6 +208,7 @@ E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_media.rs` — media upload/download (Blossom)
 - `e2e_media_extended.rs` — extended media scenarios
 - `e2e_nostr_interop.rs` — Nostr interop (NIP-50 search, NIP-10 threads, NIP-17 gift wraps)
+- `e2e_workstream.rs` — Hive Workstream kinds (35000–35003 NIP-33 heads, 47001–47030 history)
 
 Desktop E2E: `cd desktop && pnpm exec playwright test`
 
