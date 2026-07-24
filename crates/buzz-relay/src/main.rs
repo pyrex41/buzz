@@ -344,13 +344,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let audit = if config.audit_enabled && !db_is_postgres {
-        // The audit chain is Postgres-backed today (buzz-audit takes a
-        // PgPool); the SQLite audit arm is a Phase 2 follow-up.
-        tracing::warn!(
-            "BUZZ_AUDIT_ENABLED is on but the audit chain requires Postgres — \
-             audit logging disabled on the sqlite backend"
-        );
-        None
+        // SQLite Solo profile: the audit chain shares the Db's pool (the
+        // audit_log table ships in buzz-db's sqlite migration 0002, already
+        // applied above). Appends serialize on an in-process mutex inside
+        // AuditService — sufficient because the Solo profile is single-process
+        // by definition.
+        let sqlite_pool = db.sqlite_pool().ok_or_else(|| {
+            anyhow::anyhow!("sqlite backend selected but the Db handle has no sqlite pool")
+        })?;
+        info!("Audit chain ready (SQLite)");
+        Some(AuditService::new_sqlite(sqlite_pool))
     } else if config.audit_enabled {
         let audit_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)

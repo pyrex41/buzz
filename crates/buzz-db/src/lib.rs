@@ -500,9 +500,10 @@ impl Db {
 
     /// Clone of the SQLite backend's pool; `None` on Postgres.
     ///
-    /// Composition-root escape hatch: lets the relay wire services that hold
-    /// their own connection handle (e.g. the FTS5 search service in
-    /// `buzz-search`) over the same database file, without threading `Db`
+    /// Composition-root escape hatch: lets the relay wire backend-matched
+    /// sidecar services that hold their own connection handle (the FTS5
+    /// search service in `buzz-search`, `AuditService::new_sqlite` in
+    /// `buzz-audit`) over the same database file, without threading `Db`
     /// through them. Cloning an sqlx pool shares the underlying connections —
     /// this does not open a second pool against the file.
     pub fn sqlite_pool(&self) -> Option<sqlx::SqlitePool> {

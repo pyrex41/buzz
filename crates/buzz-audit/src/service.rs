@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt as _;
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::{Acquire, PgPool, Row, SqlitePool};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -19,30 +19,85 @@ use crate::{
 /// taken with `pg_advisory_lock(hashtextextended(...))` — see [`AuditService::log`].
 const AUDIT_LOCK_NAMESPACE: &str = "buzz_audit:";
 
-/// Append-only, per-community hash-chain audit log backed by Postgres.
+/// `BEGIN IMMEDIATE` for the SQLite append transaction: take the write lock at
+/// transaction start rather than at the first write, so the read-head + insert
+/// cycle never upgrades a read transaction mid-flight.
+const SQLITE_BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";
+
+/// Storage backend behind an [`AuditService`]. The chain logic
+/// ([`compute_hash`]) is shared; only row storage and append serialization
+/// differ per backend.
+enum AuditBackend {
+    /// Multi-process Postgres deployment: appends serialize on a
+    /// per-community `pg_advisory_lock`.
+    Pg { pool: PgPool },
+    /// Single-process SQLite Solo profile: appends serialize on an in-process
+    /// mutex held across the read-head + insert transaction. The Solo profile
+    /// runs exactly one relay process over the database file, so an
+    /// in-process lock is a complete substitute for the advisory lock — there
+    /// is no second process that could interleave an append. (It is coarser —
+    /// all communities share one lock — which is acceptable at Solo scale.)
+    Sqlite {
+        pool: SqlitePool,
+        append_lock: tokio::sync::Mutex<()>,
+    },
+}
+
+/// Append-only, per-community hash-chain audit log.
 ///
-/// Each community has an independent chain keyed `(community_id, seq)`. Writes
-/// for one community are serialized by a per-community advisory lock so the chain
-/// stays consistent across relay processes; different communities proceed in
-/// parallel.
+/// Each community has an independent chain keyed `(community_id, seq)`. On the
+/// Postgres backend ([`AuditService::new`]), writes for one community are
+/// serialized by a per-community advisory lock so the chain stays consistent
+/// across relay processes; different communities proceed in parallel. On the
+/// SQLite backend ([`AuditService::new_sqlite`], single-process Solo profile),
+/// appends serialize on an in-process mutex instead. The hash chain itself
+/// ([`compute_hash`]) is backend-neutral: the same logical entries produce the
+/// same chain on either backend.
 pub struct AuditService {
-    pool: PgPool,
+    backend: AuditBackend,
 }
 
 impl AuditService {
-    /// Creates a new `AuditService` using the given connection pool.
+    /// Creates a new Postgres-backed `AuditService` using the given connection
+    /// pool.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            backend: AuditBackend::Pg { pool },
+        }
+    }
+
+    /// Creates a new SQLite-backed `AuditService` (single-process Solo
+    /// profile) using the given connection pool.
+    ///
+    /// The pool must point at a database that has had buzz-db's SQLite
+    /// migrations applied (the `audit_log` table ships in migration 0002).
+    pub fn new_sqlite(pool: SqlitePool) -> Self {
+        Self {
+            backend: AuditBackend::Sqlite {
+                pool,
+                append_lock: tokio::sync::Mutex::new(()),
+            },
+        }
     }
 
     /// Append a new entry to the calling community's chain.
     ///
-    /// Serialized per-community via `pg_advisory_lock`. Postgres advisory locks
-    /// are session-scoped, so we acquire before the transaction and release
-    /// after commit (or on any error path).
+    /// Postgres: serialized per-community via `pg_advisory_lock`. SQLite:
+    /// serialized by the service's append mutex (see [`AuditBackend::Sqlite`]).
     #[instrument(skip(self, entry), fields(action = %entry.action))]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
-        let mut conn = self.pool.acquire().await?;
+        match &self.backend {
+            AuditBackend::Pg { pool } => self.log_pg(pool, entry).await,
+            AuditBackend::Sqlite { pool, append_lock } => {
+                self.log_sqlite(pool, append_lock, entry).await
+            }
+        }
+    }
+
+    /// Postgres append path. Advisory locks are session-scoped, so we acquire
+    /// before the transaction and release after commit (or on any error path).
+    async fn log_pg(&self, pool: &PgPool, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
+        let mut conn = pool.acquire().await?;
 
         // Per-community advisory lock: hash the namespaced community id to an
         // i64 lock key inside Postgres. Communities lock independently.
@@ -142,6 +197,144 @@ impl AuditService {
         Ok(audit_entry)
     }
 
+    /// SQLite append path (single-process Solo profile).
+    ///
+    /// Why the mutex is sufficient: the Solo profile runs exactly one relay
+    /// process over the SQLite file, so holding an in-process mutex across the
+    /// read-head + insert transaction serializes every append the way the
+    /// Postgres arm's advisory lock does across processes. `BEGIN IMMEDIATE`
+    /// additionally takes SQLite's write lock up front, so even a hypothetical
+    /// second writer outside this process could not interleave between the
+    /// head read and the insert — it would fail the unique `(community_id,
+    /// seq)` key rather than corrupt the chain.
+    async fn log_sqlite(
+        &self,
+        pool: &SqlitePool,
+        append_lock: &tokio::sync::Mutex<()>,
+        entry: NewAuditEntry,
+    ) -> Result<AuditEntry, AuditError> {
+        let _guard = append_lock.lock().await;
+
+        let mut tx = pool.begin_with(SQLITE_BEGIN_IMMEDIATE).await?;
+
+        // The stored row keys on the raw UUID (lowercase hyphenated TEXT on
+        // sqlite); the typed `CommunityId` on the input is the provenance
+        // fence, dereferenced here at the DB boundary.
+        let community_id = *entry.community_id.as_uuid();
+        let community_text = community_id.to_string();
+
+        // Head of THIS community's chain — scoped by community_id.
+        let head = sqlx::query(
+            "SELECT seq, hash FROM audit_log
+             WHERE community_id = ?1
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&community_text)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (prev_seq, prev_hash): (i64, Option<Vec<u8>>) = match head {
+            Some(row) => (row.try_get("seq")?, Some(row.try_get("hash")?)),
+            None => (0, None), // community's first entry
+        };
+        let seq = prev_seq + 1;
+
+        // created_at is stored as INTEGER unix seconds (buzz-db sqlite
+        // convention), so truncate to whole seconds BEFORE hashing — the
+        // stored value must round-trip to exactly the value that was hashed,
+        // or verification would recompute a different hash. The fallback
+        // branch is unreachable for any real system clock (the current time
+        // is always representable); it errors rather than silently hashing a
+        // value that could not be stored faithfully.
+        let now = Utc::now();
+        let created_at = DateTime::<Utc>::from_timestamp(now.timestamp(), 0).ok_or_else(|| {
+            AuditError::Database(sqlx::Error::Protocol(
+                "system clock outside the representable unix-seconds range".into(),
+            ))
+        })?;
+
+        let mut audit_entry = AuditEntry {
+            community_id,
+            seq,
+            hash: Vec::new(),
+            prev_hash,
+            action: entry.action,
+            actor_pubkey: entry.actor_pubkey,
+            object_id: entry.object_id,
+            detail: entry.detail,
+            created_at,
+        };
+
+        audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
+
+        debug!(seq, "writing audit entry");
+
+        sqlx::query(
+            "INSERT INTO audit_log
+                 (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&community_text)
+        .bind(audit_entry.seq)
+        .bind(&audit_entry.hash)
+        .bind(audit_entry.prev_hash.as_deref())
+        .bind(audit_entry.action.as_str())
+        .bind(audit_entry.actor_pubkey.as_deref())
+        .bind(audit_entry.object_id.as_deref())
+        .bind(&audit_entry.detail)
+        .bind(audit_entry.created_at.timestamp())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(audit_entry)
+    }
+
+    /// Fetch one community's chain segment `[from_seq, to_seq]`, ordered by
+    /// sequence number, decoded into [`AuditEntry`] values.
+    async fn fetch_range(
+        &self,
+        community: CommunityId,
+        from_seq: i64,
+        to_seq: i64,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
+        match &self.backend {
+            AuditBackend::Pg { pool } => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+                           object_id, detail, created_at
+                    FROM audit_log
+                    WHERE community_id = $1 AND seq BETWEEN $2 AND $3
+                    ORDER BY seq ASC
+                    "#,
+                )
+                .bind(community.as_uuid())
+                .bind(from_seq)
+                .bind(to_seq)
+                .fetch_all(pool)
+                .await?;
+                rows.iter().map(row_to_audit_entry).collect()
+            }
+            AuditBackend::Sqlite { pool, .. } => {
+                let rows = sqlx::query(
+                    "SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+                            object_id, detail, created_at
+                     FROM audit_log
+                     WHERE community_id = ?1 AND seq BETWEEN ?2 AND ?3
+                     ORDER BY seq ASC",
+                )
+                .bind(community.as_uuid().to_string())
+                .bind(from_seq)
+                .bind(to_seq)
+                .fetch_all(pool)
+                .await?;
+                rows.iter().map(sqlite_row_to_audit_entry).collect()
+            }
+        }
+    }
+
     /// Verify the hash chain for one community over `[from_seq, to_seq]`.
     ///
     /// Reads exactly that community's chain — it can never observe another
@@ -154,30 +347,15 @@ impl AuditService {
         from_seq: i64,
         to_seq: i64,
     ) -> Result<bool, AuditError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
-            FROM audit_log
-            WHERE community_id = $1 AND seq BETWEEN $2 AND $3
-            ORDER BY seq ASC
-            "#,
-        )
-        .bind(community.as_uuid())
-        .bind(from_seq)
-        .bind(to_seq)
-        .fetch_all(&self.pool)
-        .await?;
+        let entries = self.fetch_range(community, from_seq, to_seq).await?;
 
-        if rows.is_empty() {
+        if entries.is_empty() {
             return Ok(false);
         }
 
         let mut expected_prev: Option<Vec<u8>> = None;
 
-        for row in &rows {
-            let entry = row_to_audit_entry(row)?;
-
+        for entry in entries {
             if let Some(ref expected) = expected_prev {
                 // The previous entry's hash must equal this entry's prev_hash.
                 if entry.prev_hash.as_deref() != Some(expected.as_slice()) {
@@ -206,23 +384,42 @@ impl AuditService {
         from_seq: i64,
         limit: i64,
     ) -> Result<Vec<AuditEntry>, AuditError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
-            FROM audit_log
-            WHERE community_id = $1 AND seq >= $2
-            ORDER BY seq ASC
-            LIMIT $3
-            "#,
-        )
-        .bind(community.as_uuid())
-        .bind(from_seq)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.iter().map(row_to_audit_entry).collect()
+        match &self.backend {
+            AuditBackend::Pg { pool } => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+                           object_id, detail, created_at
+                    FROM audit_log
+                    WHERE community_id = $1 AND seq >= $2
+                    ORDER BY seq ASC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(community.as_uuid())
+                .bind(from_seq)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.iter().map(row_to_audit_entry).collect()
+            }
+            AuditBackend::Sqlite { pool, .. } => {
+                let rows = sqlx::query(
+                    "SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
+                            object_id, detail, created_at
+                     FROM audit_log
+                     WHERE community_id = ?1 AND seq >= ?2
+                     ORDER BY seq ASC
+                     LIMIT ?3",
+                )
+                .bind(community.as_uuid().to_string())
+                .bind(from_seq)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.iter().map(sqlite_row_to_audit_entry).collect()
+            }
+        }
     }
 }
 
@@ -243,6 +440,43 @@ fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditEr
         object_id: row.get("object_id"),
         detail: row.get("detail"),
         created_at: row.get("created_at"),
+    })
+}
+
+/// A stored-value decode failure on the sqlite arm, surfaced through the
+/// existing [`AuditError::Database`] variant.
+fn sqlite_decode_err(msg: String) -> AuditError {
+    AuditError::Database(sqlx::Error::Decode(msg.into()))
+}
+
+/// Decode a sqlite `audit_log` row (buzz-db sqlite conventions: UUID as
+/// lowercase hyphenated TEXT, timestamps as INTEGER unix seconds, bytes as
+/// BLOB, JSON as TEXT) into an [`AuditEntry`].
+fn sqlite_row_to_audit_entry(row: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry, AuditError> {
+    let action_str: String = row.try_get("action")?;
+    let action: AuditAction = action_str.parse().map_err(|_| {
+        warn!("unknown action in audit log");
+        AuditError::UnknownAction
+    })?;
+
+    let community_text: String = row.try_get("community_id")?;
+    let community_id = Uuid::parse_str(&community_text)
+        .map_err(|e| sqlite_decode_err(format!("invalid community_id uuid text: {e}")))?;
+
+    let created_secs: i64 = row.try_get("created_at")?;
+    let created_at = DateTime::<Utc>::from_timestamp(created_secs, 0)
+        .ok_or_else(|| sqlite_decode_err(format!("created_at out of range: {created_secs}")))?;
+
+    Ok(AuditEntry {
+        community_id,
+        seq: row.try_get("seq")?,
+        hash: row.try_get("hash")?,
+        prev_hash: row.try_get("prev_hash")?,
+        action,
+        actor_pubkey: row.try_get("actor_pubkey")?,
+        object_id: row.try_get("object_id")?,
+        detail: row.try_get("detail")?,
+        created_at,
     })
 }
 

@@ -10,12 +10,15 @@
 //! non-interference floor (`auditHeads[c]` in `MultiTenantRelay.tla`): an audit
 //! observation reveals only its own community's head.
 //!
-//! Writes for a given community are serialized by a **per-community** Postgres
-//! advisory lock, so the chain stays consistent across relay processes without one
-//! global lock serializing (and timing-coupling) every tenant.
+//! On the Postgres backend, writes for a given community are serialized by a
+//! **per-community** Postgres advisory lock, so the chain stays consistent across
+//! relay processes without one global lock serializing (and timing-coupling) every
+//! tenant. On the SQLite backend (single-process Solo profile), appends serialize
+//! on an in-process mutex instead — see [`AuditService::new_sqlite`].
 //!
-//! The `audit_log` table is owned by the consolidated `0001` migration — this crate
-//! is pure chain logic and ships no DDL.
+//! The `audit_log` table is owned by its backend's migrations (Postgres: the
+//! consolidated `0001` migration; SQLite: buzz-db's embedded migration `0002`) —
+//! this crate is pure chain logic and ships no DDL.
 
 /// Audit action types recorded in the log.
 pub mod action;

@@ -28,11 +28,20 @@ use crate::error::Result;
 /// Embedded consolidated schema, applied idempotently at startup.
 const SCHEMA: &str = include_str!("schema.sql");
 
+/// Embedded migration 0002 — audit hash-chain table (Solo profile).
+const SCHEMA_V2_AUDIT: &str = include_str!("schema_v2_audit.sql");
+
+/// Ordered, version-gated migration scripts. Each script applies exactly once
+/// (recorded in `schema_migrations`); a fresh database applies all of them in
+/// order, an existing database applies only the versions it is missing.
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA), (2, SCHEMA_V2_AUDIT)];
+
 /// Bring the SQLite schema to the current version.
 ///
-/// Version-gated: the consolidated schema applies exactly once, recorded in
-/// `schema_migrations`. Executed as one multi-statement script inside a
-/// transaction — trigger bodies contain `;`, so the script is never split.
+/// Version-gated: each script in [`MIGRATIONS`] applies exactly once, recorded
+/// in `schema_migrations`. Every script is executed as one multi-statement
+/// batch inside its own transaction — trigger bodies contain `;`, so scripts
+/// are never split. Re-running is a no-op.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (\
@@ -42,19 +51,23 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    let applied: Option<(i64,)> =
-        sqlx::query_as("SELECT version FROM schema_migrations WHERE version = 1")
-            .fetch_optional(pool)
+    for (version, script) in MIGRATIONS {
+        let applied: Option<(i64,)> =
+            sqlx::query_as("SELECT version FROM schema_migrations WHERE version = ?1")
+                .bind(version)
+                .fetch_optional(pool)
+                .await?;
+        if applied.is_some() {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql(*script).execute(tx.as_mut()).await?;
+        sqlx::query("INSERT INTO schema_migrations (version, applied_at) VALUES (?1, unixepoch())")
+            .bind(version)
+            .execute(tx.as_mut())
             .await?;
-    if applied.is_some() {
-        return Ok(());
+        tx.commit().await?;
     }
-    let mut tx = pool.begin().await?;
-    sqlx::raw_sql(SCHEMA).execute(tx.as_mut()).await?;
-    sqlx::query("INSERT INTO schema_migrations (version, applied_at) VALUES (1, unixepoch())")
-        .execute(tx.as_mut())
-        .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -93,6 +106,76 @@ mod tests {
                 .await
                 .expect("fts table present");
         assert_eq!(fts, 1, "events_fts virtual table must exist");
+
+        // Version 2 (audit chain) must have applied alongside version 1.
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("read schema_migrations");
+        assert_eq!(versions, vec![(1,), (2,)], "fresh DB must apply v1 then v2");
+        let (audit,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'audit_log'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("audit table lookup");
+        assert_eq!(audit, 1, "audit_log table must exist after v2");
+    }
+
+    /// A database recorded at version 1 must apply only version 2 — the
+    /// upgrade path for existing Solo deployments. Simulates a v1 lineage
+    /// without the audit table (the consolidated v1 ships it, but v2 is the
+    /// version-gated guarantee) by dropping it before upgrading.
+    #[tokio::test]
+    async fn existing_v1_db_applies_only_v2() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect");
+
+        // Simulate a pre-v2 database: apply v1 by hand and record it, then
+        // drop the audit table to model a v1 lineage that lacked it.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (\
+                 version INTEGER PRIMARY KEY,\
+                 applied_at INTEGER NOT NULL\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create schema_migrations");
+        sqlx::raw_sql(SCHEMA)
+            .execute(&pool)
+            .await
+            .expect("apply v1");
+        sqlx::query("INSERT INTO schema_migrations (version, applied_at) VALUES (1, unixepoch())")
+            .execute(&pool)
+            .await
+            .expect("record v1");
+        sqlx::query("DROP TABLE audit_log")
+            .execute(&pool)
+            .await
+            .expect("drop audit_log");
+
+        run_migrations(&pool).await.expect("upgrade to v2");
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("read schema_migrations");
+        assert_eq!(versions, vec![(1,), (2,)]);
+        let (audit,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'audit_log'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("audit table lookup");
+        assert_eq!(audit, 1, "audit_log table must exist after upgrade");
+
+        // Re-running remains a no-op.
+        run_migrations(&pool).await.expect("idempotent re-run");
     }
 }
 

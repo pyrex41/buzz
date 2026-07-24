@@ -861,6 +861,7 @@ name = "buzz-audit"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-db",
  "chrono",
  "futures-util",
  "hex",
