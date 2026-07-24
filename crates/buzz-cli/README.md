@@ -162,6 +162,32 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+| `workstream` | `create` | Create or replace a workstream head (kind 35000) |
+| | `list` | List workstream heads (channel/type/status scoped) |
+| | `show` | Show the current head, resolved by coordinate |
+| | `set-status` | Replace the head with a new status |
+| `task` | `create` | Create or replace a task head (kind 35001) |
+| | `list` | List tasks by workstream, channel, status, or assignee |
+| | `show` | Show a task head plus its 47001 status history |
+| | `edit` | Partially edit the head (NIP-33 replace) |
+| | `status` | Record a status change (47001) and bump the head |
+| `artifact` | `create` | Create or replace an artifact head (kind 35002) |
+| | `version` | Publish an immutable version (kind 47002) |
+| | `list` | List artifacts by channel, workstream, or type |
+| | `show` | Show an artifact head plus its version history |
+| `review` | `request` | Request review of any workstream entity (47010) |
+| | `comment` | Comment in a review thread (47011, NIP-10) |
+| | `decide` | Record approve / request-changes / reject (47012) |
+| | `list` | List review requests, comments, and decisions |
+| `decision` | `create` | Record a decision (kind 35003) |
+| | `list` | List decision records |
+| | `supersede` | Publish a successor and retire its predecessor |
+| `handoff` | `create` | Pass work to another person or agent (47030) |
+| | `list` | List handoffs |
+| `experiment` | `log` | Append an experiment log entry (47020) |
+| | `list` | List experiment log entries |
+| `measure` | `add` | Record a measurement (47021) |
+| | `list` | List measurements |
 
 ## Architecture
 
