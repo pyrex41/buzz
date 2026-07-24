@@ -41,6 +41,7 @@ import {
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
   KIND_USER_STATUS,
+  WORKSTREAM_HEAD_KINDS,
 } from "@/shared/constants/kinds";
 import type {
   RawAcpAuthMethodsResult,
@@ -1048,6 +1049,8 @@ declare global {
       slotId: string;
     }) => unknown;
     __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
+    /** Replace the mock relay's Workstream-family event store (Hive §5.1). */
+    __BUZZ_E2E_SEED_MOCK_WORKSTREAMS__?: (events: RelayEvent[]) => void;
     __BUZZ_E2E_QUERY_CLIENT__?: {
       invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
     };
@@ -2695,6 +2698,68 @@ const mockChannels: MockChannel[] = [
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+
+// Workstream family (Hive §5.1): 35000-35003 addressable heads plus the
+// 47xxx append-only history. Held in one array because the REQ handler filters
+// by kind anyway, and a single store keeps head-replacement and history-append
+// visibly side by side.
+const mockWorkstreamEvents: RelayEvent[] = [];
+
+const MOCK_WORKSTREAM_HEAD_KINDS = new Set<number>(WORKSTREAM_HEAD_KINDS);
+
+const MOCK_WORKSTREAM_KINDS = new Set<number>([
+  ...WORKSTREAM_HEAD_KINDS,
+  47001,
+  47002,
+  47010,
+  47011,
+  47012,
+  47020,
+  47021,
+  47030,
+]);
+
+function mockEventTagValues(event: RelayEvent, name: string): string[] {
+  return event.tags
+    .filter((tag) => tag[0] === name && tag[1] !== undefined)
+    .map((tag) => tag[1]);
+}
+
+// Mirror the relay's NIP-33 replace for the addressable kinds: keep only the
+// latest event per (kind, pubkey, d). Without this the mock would accumulate
+// every revision and the client's LWW reduce would be testing itself against
+// a relay that does not behave like the real one.
+function storeMockWorkstreamEvent(event: RelayEvent): void {
+  if (MOCK_WORKSTREAM_HEAD_KINDS.has(event.kind)) {
+    const dTag = mockEventTagValues(event, "d")[0];
+    if (dTag !== undefined) {
+      const index = mockWorkstreamEvents.findIndex(
+        (candidate) =>
+          candidate.kind === event.kind &&
+          candidate.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+          mockEventTagValues(candidate, "d")[0] === dTag,
+      );
+      if (index >= 0) mockWorkstreamEvents.splice(index, 1);
+    }
+  }
+  mockWorkstreamEvents.push(event);
+}
+
+function filterMockWorkstreamEvents(filter: MockFilter): RelayEvent[] {
+  const kinds = filter.kinds;
+  const matchesTag = (event: RelayEvent, tag: string, wanted?: string[]) =>
+    wanted === undefined ||
+    mockEventTagValues(event, tag).some((value) => wanted.includes(value));
+
+  return mockWorkstreamEvents.filter(
+    (event) =>
+      (kinds === undefined || kinds.includes(event.kind)) &&
+      matchesTag(event, "h", filter["#h"]) &&
+      matchesTag(event, "a", filter["#a"]) &&
+      matchesTag(event, "e", filter["#e"]) &&
+      matchesTag(event, "d", filter["#d"]),
+  );
+}
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -8645,6 +8710,14 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.some((kind) => MOCK_WORKSTREAM_KINDS.has(kind))) {
+      for (const event of filterMockWorkstreamEvents(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     if (filter.kinds?.includes(KIND_EVENT_REMINDER)) {
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const event of mockReminderEvents) {
@@ -8731,6 +8804,12 @@ function sendToMockSocket(args: {
     }
 
     if (event.kind === 30078) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (MOCK_WORKSTREAM_KINDS.has(event.kind)) {
+      storeMockWorkstreamEvent(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -9040,6 +9119,11 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ = () =>
     relayClient.getConnectionState();
+
+  window.__BUZZ_E2E_SEED_MOCK_WORKSTREAMS__ = (events) => {
+    mockWorkstreamEvents.length = 0;
+    for (const event of events) storeMockWorkstreamEvent(event);
+  };
 
   window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
     mockReminderEvents.length = 0;

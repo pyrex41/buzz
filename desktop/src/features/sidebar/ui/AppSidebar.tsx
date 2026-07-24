@@ -102,6 +102,7 @@ type AppSidebarProps = {
     | "messages"
     | "agents"
     | "workflows"
+    | "workstreams"
     | "pulse"
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
@@ -144,6 +145,7 @@ type AppSidebarProps = {
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
+  onSelectWorkstreams: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit) => void;
@@ -211,6 +213,7 @@ export function AppSidebar({
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
+  onSelectWorkstreams,
   onSelectHome,
   onSelectChannel,
   onOpenSearchResult,
@@ -598,6 +601,7 @@ export function AppSidebar({
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}
                 onSelectWorkflows={onSelectWorkflows}
+                onSelectWorkstreams={onSelectWorkstreams}
                 selectedView={selectedView}
               />
 

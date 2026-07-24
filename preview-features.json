@@ -10,6 +10,14 @@
       ]
     },
     {
+      "id": "workstreams",
+      "name": "Workstreams",
+      "description": "Task boards, artifacts, and decision records for code and non-code work",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",
