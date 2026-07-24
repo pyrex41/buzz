@@ -291,6 +291,12 @@ test-unit:
 test-integration:
     ./scripts/run-tests.sh integration
 
+# Solo profile E2E gate: boots the relay on SQLite + in-process messaging +
+# local-FS media (zero external services) and runs the relay-protocol E2E
+# suites against it. Uses the dev profile locally; CI passes --profile ci.
+solo-e2e:
+    ./scripts/solo-e2e.sh --profile dev
+
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
 mesh-e2e:
