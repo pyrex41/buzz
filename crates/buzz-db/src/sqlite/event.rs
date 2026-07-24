@@ -1520,47 +1520,138 @@ pub enum SqliteCommandEventPersist {
     Inserted(SqliteCommandEventTx),
 }
 
-/// Opaque open SQLite transaction guarding a freshly persisted command event.
+/// Deferred command-event insert guarding a validated command event.
 ///
-/// Dropping the guard rolls the insert back; call
-/// [`SqliteCommandEventTx::commit`] once the command's domain mutation has
-/// succeeded so the event record and mutation land together. Same `commit()`
-/// shape as [`crate::event::CommandEventTx`].
+/// Unlike the Postgres guard (an open transaction serialized by
+/// `pg_advisory_xact_lock`), this guard holds NO transaction, NO connection,
+/// and NO SQLite lock — it buffers the row and performs the actual
+/// check-and-insert atomically inside [`SqliteCommandEventTx::commit`].
 ///
-/// NOTE: while this guard is open it holds the SQLite write lock (the
-/// transaction began with `BEGIN IMMEDIATE`) — domain mutations that need
-/// their own write transaction must happen after commit, exactly like the
-/// Postgres pattern of running mutations on the pool.
-pub struct SqliteCommandEventTx(Transaction<'static, Sqlite>);
+/// Why: the command executor's contract is persist → run domain mutations →
+/// commit, and the domain mutations (e.g. `open_dm`) open their own write
+/// transactions. On Postgres those ride a second pool connection; on SQLite
+/// an open `BEGIN IMMEDIATE` guard would hold both the single pooled
+/// connection and the global write lock across the mutation — a
+/// self-deadlock. Deferring the insert preserves the guard's observable
+/// semantics: dropping it leaves no trace (the row was never written), and
+/// `commit()` lands the event with the same dominance/duplicate checks
+/// re-run atomically.
+///
+/// Trade-off vs Postgres, documented honestly: the advisory lock serializes
+/// the entire persist→mutate→commit window per NIP-33 coordinate; here only
+/// the commit is serialized, so two racing same-coordinate commands can both
+/// run their (idempotent) domain mutations before last-write-wins resolves
+/// at commit time. Single-process Solo traffic makes that race window
+/// acceptable; the stored-event outcome is identical.
+pub struct SqliteCommandEventTx {
+    pool: SqlitePool,
+    community: String,
+    id: Vec<u8>,
+    pubkey: Vec<u8>,
+    created_at_secs: i64,
+    kind_i32: i32,
+    tags: String,
+    content: String,
+    sig: Vec<u8>,
+    channel_id: Option<Uuid>,
+    d_tag: Option<String>,
+}
 
 impl SqliteCommandEventTx {
-    /// Commit the guarded event insert.
+    /// Atomically land the buffered event insert.
+    ///
+    /// Re-runs the NIP-33 dominance check and the duplicate-id guard inside
+    /// one short `BEGIN IMMEDIATE` transaction. Losing either race is
+    /// idempotent success (`Ok`), mirroring the `Duplicate` outcome the
+    /// persist step would have reported had the competitor arrived first.
     pub async fn commit(self) -> Result<()> {
-        self.0.commit().await.map_err(DbError::from)
+        let mut tx = self.pool.begin_with(BEGIN_IMMEDIATE).await?;
+
+        if let Some(ref d_tag) = self.d_tag {
+            let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
+                "SELECT created_at, id FROM events \
+                 WHERE community_id = ?1 AND kind = ?2 AND pubkey = ?3 AND d_tag = ?4 \
+                   AND deleted_at IS NULL \
+                 ORDER BY created_at DESC, id ASC LIMIT 1",
+            )
+            .bind(&self.community)
+            .bind(self.kind_i32)
+            .bind(self.pubkey.as_slice())
+            .bind(d_tag)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some((existing_ts, existing_id)) = existing {
+                if dominated_by(
+                    self.created_at_secs,
+                    self.id.as_slice(),
+                    existing_ts,
+                    &existing_id,
+                ) {
+                    // A newer head landed while the mutation ran — stale
+                    // write, idempotent success (LWW).
+                    return Ok(());
+                }
+
+                sqlx::query(
+                    "UPDATE events SET deleted_at = unixepoch() \
+                     WHERE community_id = ?1 AND kind = ?2 AND pubkey = ?3 AND d_tag = ?4 \
+                       AND deleted_at IS NULL",
+                )
+                .bind(&self.community)
+                .bind(self.kind_i32)
+                .bind(self.pubkey.as_slice())
+                .bind(d_tag)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&self.community)
+        .bind(self.id.as_slice())
+        .bind(self.pubkey.as_slice())
+        .bind(self.created_at_secs)
+        .bind(self.kind_i32)
+        .bind(&self.tags)
+        .bind(&self.content)
+        .bind(self.sig.as_slice())
+        .bind(Utc::now().timestamp())
+        .bind(self.channel_id.map(uuid_text))
+        .bind(&self.d_tag)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await.map_err(DbError::from)
     }
 }
 
-/// Persist a command-kind event inside an open transaction with an
-/// idempotency guard (`ON CONFLICT DO NOTHING`).
+/// Validate a command-kind event and prepare its deferred insert.
 ///
-/// Mirrors `crate::event::persist_command_event`: for NIP-33 command kinds
-/// (those carrying a `d` tag) the previous head is checked for dominance
-/// (stale writes → [`SqliteCommandEventPersist::Duplicate`]) and soft-deleted
-/// before the new head is inserted. Writer serialization comes from the
-/// `BEGIN IMMEDIATE` write lock instead of `pg_advisory_xact_lock`.
+/// Mirrors `crate::event::persist_command_event`'s observable outcomes: for
+/// NIP-33 command kinds (those carrying a `d` tag) the current head is
+/// checked for dominance — stale writes report
+/// [`SqliteCommandEventPersist::Duplicate`] — and exact-id resubmissions are
+/// detected up front. No transaction is opened here; the insert (with the
+/// checks re-run atomically) happens in [`SqliteCommandEventTx::commit`] so
+/// that no SQLite lock or pooled connection is held while the caller runs
+/// its domain mutation. See the guard's docs for the full rationale.
 pub(crate) async fn persist_command_event(
     pool: &SqlitePool,
     community_id: CommunityId,
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<SqliteCommandEventPersist> {
-    let mut tx = pool.begin_with(BEGIN_IMMEDIATE).await?;
     let community = community_text(community_id);
 
     let pubkey_bytes = event.pubkey.to_bytes();
     let kind_i32 = event.kind.as_u16() as i32;
     let created_at_secs = event.created_at.as_secs() as i64;
-    let received_at = Utc::now();
 
     let d_tag = extract_d_tag(event);
     if let Some(ref d_tag) = d_tag {
@@ -1572,9 +1663,8 @@ pub(crate) async fn persist_command_event(
             )));
         }
 
-        // NIP-33 command events replace by coordinate: reject stale writes
-        // before the caller executes the domain mutation. The open IMMEDIATE
-        // transaction serializes concurrent writers for this coordinate.
+        // NIP-33 dominance pre-check: reject stale writes before the caller
+        // executes the domain mutation. Re-checked atomically at commit.
         let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT created_at, id FROM events \
              WHERE community_id = ?1 AND kind = ?2 AND pubkey = ?3 AND d_tag = ?4 \
@@ -1585,7 +1675,7 @@ pub(crate) async fn persist_command_event(
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
         .bind(d_tag)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(pool)
         .await?;
 
         let incoming_id = event.id.as_bytes().as_slice();
@@ -1593,49 +1683,34 @@ pub(crate) async fn persist_command_event(
             if dominated_by(created_at_secs, incoming_id, existing_ts, &existing_id) {
                 return Ok(SqliteCommandEventPersist::Duplicate);
             }
-
-            sqlx::query(
-                "UPDATE events SET deleted_at = unixepoch() \
-                 WHERE community_id = ?1 AND kind = ?2 AND pubkey = ?3 AND d_tag = ?4 \
-                   AND deleted_at IS NULL",
-            )
-            .bind(&community)
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .execute(&mut *tx)
-            .await?;
         }
     }
 
-    let result = sqlx::query(
-        "INSERT INTO events \
-         (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&community)
-    .bind(event.id.as_bytes().as_slice())
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at_secs)
-    .bind(kind_i32)
-    .bind(tags_text(event)?)
-    .bind(&event.content)
-    .bind(event.sig.serialize().as_slice())
-    .bind(received_at.timestamp())
-    .bind(channel_id.map(uuid_text))
-    .bind(d_tag)
-    .execute(&mut *tx)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        // Duplicate — rollback (implicit on drop) and signal idempotent success.
-        Ok(SqliteCommandEventPersist::Duplicate)
-    } else {
-        Ok(SqliteCommandEventPersist::Inserted(SqliteCommandEventTx(
-            tx,
-        )))
+    // Exact-id resubmission pre-check (the common duplicate path). Races are
+    // caught by commit's ON CONFLICT DO NOTHING.
+    let already: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM events WHERE community_id = ?1 AND id = ?2")
+            .bind(&community)
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_optional(pool)
+            .await?;
+    if already.is_some() {
+        return Ok(SqliteCommandEventPersist::Duplicate);
     }
+
+    Ok(SqliteCommandEventPersist::Inserted(SqliteCommandEventTx {
+        pool: pool.clone(),
+        community,
+        id: event.id.as_bytes().to_vec(),
+        pubkey: pubkey_bytes.to_vec(),
+        created_at_secs,
+        kind_i32,
+        tags: tags_text(event)?,
+        content: event.content.clone(),
+        sig: event.sig.serialize().to_vec(),
+        channel_id,
+        d_tag,
+    }))
 }
 
 // ── NIP-ER reminders ────────────────────────────────────────────────────────
