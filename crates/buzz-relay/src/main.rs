@@ -407,18 +407,16 @@ async fn main() -> anyhow::Result<()> {
         );
         SearchService::new(search_pool)
     } else {
-        // SQLite profile: the FTS5 query path is a Phase 2 follow-up. A lazy
-        // pool never connects unless a NIP-50 search actually arrives, which
-        // then errors cleanly instead of failing boot.
-        tracing::warn!(
-            "NIP-50 search is not yet available on the sqlite backend — \
-             search requests will error until the FTS5 query path lands"
-        );
-        SearchService::new(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy(&config.database_url)
-                .map_err(|e| anyhow::anyhow!("lazy search pool: {e}"))?,
-        )
+        // SQLite profile: FTS5 queries run over the same database file,
+        // sharing the Db's pool. No FTS5 compile-option assertion is needed
+        // here — the schema migration creates the `events_fts` virtual table
+        // at boot, so a libsqlite3 built without FTS5 already failed startup
+        // before this point.
+        let sqlite_pool = db.sqlite_pool().ok_or_else(|| {
+            anyhow::anyhow!("sqlite backend selected but the Db exposes no sqlite pool")
+        })?;
+        info!("Search service ready (SQLite FTS5)");
+        SearchService::new_sqlite(sqlite_pool)
     };
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
