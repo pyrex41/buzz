@@ -94,6 +94,12 @@ pub struct Config {
     pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Whether the zero-service solo profile selected the backend defaults
+    /// (`BUZZ_PROFILE=solo` / `--profile solo`). Explicit `BUZZ_*` variables
+    /// always override individual defaults; this flag only records the
+    /// profile choice so boot-time gates (e.g. the S3 git conformance
+    /// probe) can pick solo-appropriate defaults too.
+    pub solo_profile: bool,
     /// Storage engine selection (`BUZZ_DB_BACKEND`: "postgres" | "sqlite").
     pub db_backend: DbBackendKind,
     /// SQLite database path (`BUZZ_SQLITE_PATH`), sqlite backend only.
@@ -452,6 +458,25 @@ fn ensure_git_path(
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
+        // Profile selects the DEFAULT backend trio; every explicit BUZZ_*
+        // variable still wins. `solo` is the zero-service profile from the
+        // Hive plan (§8 Phase 2.5): SQLite storage, in-process messaging,
+        // local-filesystem media — one binary, no Postgres/Redis/S3, data
+        // under ./data. The relay binary also accepts `--profile solo`,
+        // which main() maps onto this variable before config load.
+        let solo_profile = match std::env::var("BUZZ_PROFILE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "default" | "postgres" => false,
+            "solo" => true,
+            other => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_PROFILE must be 'solo' or unset, got '{other}'"
+                )))
+            }
+        };
         let bind_addr_raw =
             std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
@@ -465,7 +490,13 @@ impl Config {
             .filter(|v| !v.is_empty());
 
         let db_backend = match std::env::var("BUZZ_DB_BACKEND")
-            .unwrap_or_else(|_| "postgres".to_string())
+            .unwrap_or_else(|_| {
+                if solo_profile {
+                    "sqlite".to_string()
+                } else {
+                    "postgres".to_string()
+                }
+            })
             .to_ascii_lowercase()
             .as_str()
         {
@@ -581,7 +612,13 @@ impl Config {
         // (Redis) state — reject the combination instead of silently weakening
         // replay/rate-limit guarantees.
         let messaging_backend = match std::env::var("BUZZ_MESSAGING_BACKEND")
-            .unwrap_or_else(|_| "redis".to_string())
+            .unwrap_or_else(|_| {
+                if solo_profile {
+                    "inproc".to_string()
+                } else {
+                    "redis".to_string()
+                }
+            })
             .to_ascii_lowercase()
             .as_str()
         {
@@ -761,7 +798,13 @@ impl Config {
             .unwrap_or(9102);
 
         let media_backend = match std::env::var("BUZZ_MEDIA_BACKEND")
-            .unwrap_or_else(|_| "s3".to_string())
+            .unwrap_or_else(|_| {
+                if solo_profile {
+                    "local".to_string()
+                } else {
+                    "s3".to_string()
+                }
+            })
             .to_ascii_lowercase()
             .as_str()
         {
@@ -1034,6 +1077,7 @@ impl Config {
             database_url,
             read_database_url,
             redis_url,
+            solo_profile,
             db_backend,
             sqlite_path,
             messaging_backend,

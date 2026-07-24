@@ -80,6 +80,24 @@ const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `buzz-relay --profile solo` — CLI spelling of BUZZ_PROFILE (the env
+    // var wins if both are set, matching every other BUZZ_* precedence).
+    // Parsed before Config::from_env, which owns the profile's semantics.
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let value = match arg.as_str() {
+            "--profile" => args.next(),
+            _ if arg.starts_with("--profile=") => arg.split_once('=').map(|(_, v)| v.to_string()),
+            _ => continue,
+        };
+        let Some(value) = value else {
+            anyhow::bail!("--profile requires a value (e.g. --profile solo)");
+        };
+        if std::env::var("BUZZ_PROFILE").is_err() {
+            std::env::set_var("BUZZ_PROFILE", value);
+        }
+    }
+
     // Install the ring CryptoProvider for rustls. Required before any rustls
     // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
     // aws-lc-rs and ring are compiled in transitively, so rustls can't
@@ -178,8 +196,15 @@ async fn main() -> anyhow::Result<()> {
         buzz_relay::config::DbBackendKind::Postgres
     );
 
-    let auto_migrate =
-        buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
+    // Solo defaults auto-migrate ON: the profile's first boot creates the
+    // SQLite file from nothing, so without migrations there is no schema at
+    // all. An explicit BUZZ_AUTO_MIGRATE still wins, matching the profile's
+    // defaults-only contract. Served (Postgres) deployments keep their
+    // explicit opt-in.
+    let auto_migrate = match std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref() {
+        None if config.solo_profile => true,
+        v => buzz_auto_migrate_enabled(v),
+    };
     if auto_migrate {
         db.migrate().await.map_err(|e| {
             error!("Failed to run database migrations: {e}");
@@ -509,9 +534,14 @@ async fn main() -> anyhow::Result<()> {
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
+    // Default ON for served deployments, OFF under `--profile solo`: the git
+    // object store is S3-only today (git capability gating is Phase 3), so a
+    // zero-service boot would fail this probe against a bucket that cannot
+    // exist. Explicitly setting BUZZ_GIT_CONFORMANCE_PROBE overrides either
+    // default — solo + real S3 config is a legitimate combination.
     if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
         .map(|v| v != "false")
-        .unwrap_or(true)
+        .unwrap_or(!config.solo_profile)
     {
         let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
             .ok()
@@ -1423,6 +1453,15 @@ async fn run_usage_metrics_tick(
     leader: &mut Option<buzz_db::UsageMetricsLeader>,
     emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
 ) -> anyhow::Result<()> {
+    // The DB-derived usage collection (host map, leader lock, count queries)
+    // is Postgres-profile machinery; on SQLite it would fail every tick with
+    // UnsupportedBackend and log an hourly error. Solo still gets the
+    // in-memory gauges — without a host map they carry the process-local
+    // scope, which on a single-community solo relay is the whole truth.
+    if state.config.db_backend != buzz_relay::config::DbBackendKind::Postgres {
+        emit_in_memory_usage_metrics(state, emission_scope, None, emitted_in_memory);
+        return Ok(());
+    }
     let host_map: HashMap<Uuid, String> = match state.db.usage_community_hosts().await {
         Ok(hosts) => hosts
             .into_iter()

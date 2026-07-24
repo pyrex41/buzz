@@ -110,22 +110,20 @@ else
 fi
 
 # ── Start relay: zero external services ──────────────────────────────────────
-# The deployment community (host=localhost:3000) is auto-ensured at boot from
-# RELAY_URL — no seeding step. The git A3 conformance probe is disabled: it
-# gates the S3 pointer-CAS protocol, which the Solo profile does not serve.
-# The WS admission budget is raised because the subscription-limit test opens
-# 1024 REQs in a burst to exercise MAX_SUBSCRIPTIONS — impossible under the
-# default 10/s x 5s window.
+# BUZZ_PROFILE=solo IS the configuration under test: it defaults the whole
+# backend trio (sqlite + inproc messaging + local-FS media), auto-migrates,
+# and skips the S3 git A3 conformance probe. The only overrides are test
+# plumbing: data paths isolated under target/solo-e2e, and a raised WS
+# admission budget because the subscription-limit test opens 1024 REQs in a
+# burst to exercise MAX_SUBSCRIPTIONS — impossible under the default
+# 10/s x 5s window. The deployment community (host=localhost:3000) is
+# auto-ensured at boot from RELAY_URL — no seeding step.
 
-log "Starting Solo relay (sqlite + inproc messaging + local media)..."
+log "Starting Solo relay (--profile solo: sqlite + inproc messaging + local media)..."
 nohup env \
-  BUZZ_DB_BACKEND=sqlite \
+  BUZZ_PROFILE=solo \
   BUZZ_SQLITE_PATH="${SOLO_DIR}/buzz.db" \
-  BUZZ_AUTO_MIGRATE=true \
-  BUZZ_MESSAGING_BACKEND=inproc \
-  BUZZ_MEDIA_BACKEND=local \
   BUZZ_MEDIA_PATH="${SOLO_DIR}/media" \
-  BUZZ_GIT_CONFORMANCE_PROBE=false \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
