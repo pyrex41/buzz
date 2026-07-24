@@ -4,7 +4,7 @@
 //! ([`super::room::Room::broadcast_frame`]). Under horizontal scaling, two
 //! participants can land on different pods and never hear each other — which is
 //! why [`super::handler`] rejects joins with `huddle_audio_unavailable` when the
-//! deployment sets `huddle_audio_available = false`. This module removes that
+//! deployment sets `capabilities.huddle_audio = false`. This module removes that
 //! wall by routing audio across the mesh to the pod that *owns* the huddle.
 //!
 //! ## Owner-authoritative model

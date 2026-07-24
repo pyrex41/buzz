@@ -301,6 +301,21 @@ pub(crate) fn harden_git_env(cmd: &mut Command) {
         .env("HOME", "/dev/null");
 }
 
+/// The response a git route gives when the capability is disabled.
+///
+/// Defence in depth: with `BUZZ_CAPABILITY_GIT=false` the router never mounts
+/// these handlers, so no caller can reach this in a correctly wired relay. It
+/// exists so the disabled state is a value the handlers carry rather than an
+/// invariant the router alone upholds, and it answers exactly as an unmounted
+/// route would.
+fn git_disabled_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        "git capability is disabled on this relay",
+    )
+        .into_response()
+}
+
 /// Acquire the global git-subprocess semaphore permit, or respond 503.
 ///
 /// Bounds total in-flight git subprocesses across all routes. Returned
@@ -549,9 +564,10 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
-            .await
-        {
+        let Some(git) = state.git.as_ref() else {
+            return Err(git_disabled_response());
+        };
+        match load_manifest_for_read(&git.store, &auth.tenant, &params.owner, &params.repo).await {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
                 return Ok(Response::builder()
@@ -593,14 +609,17 @@ async fn info_refs_subprocess(
     params: &GitRepoParams,
 ) -> Result<Response, Response> {
     let _permit = acquire_git_permit(state, "info_refs")?;
+    let Some(git) = state.git.as_ref() else {
+        return Err(git_disabled_response());
+    };
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        &git.store,
         tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -728,14 +747,17 @@ pub async fn upload_pack(
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
     let permit = acquire_git_permit(&state, "upload_pack")?;
+    let Some(git) = state.git.as_ref() else {
+        return Err(git_disabled_response());
+    };
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        &git.store,
         &auth.tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -818,13 +840,16 @@ pub async fn receive_pack(
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
+    let Some(git) = state.git.as_ref() else {
+        return Err(git_disabled_response());
+    };
     let (repo, parent_state) = hydrate_for_write(
-        &state.git_store,
+        &git.store,
         &auth.tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -1497,8 +1522,12 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     // Step 7 (CAS). The PushContext binds `parent_state` (observed at
     // hydrate) to the CAS predicate here — no re-reading of the pointer
     // between hydrate and CAS.
+    let Some(git) = state.git.as_ref() else {
+        drop(ctx.repo_handle);
+        return git_disabled_response();
+    };
     let success = match cas_publish(
-        &state.git_store,
+        &git.store,
         &ctx.tenant,
         ctx.repo_handle.path(),
         &ctx.owner,

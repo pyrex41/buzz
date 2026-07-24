@@ -2598,6 +2598,17 @@ const DEFAULT_HEAD: &str = "refs/heads/main";
 /// pointer body (e.g. a non-empty manifest from a previous announce/push pair
 /// for the same `(owner, repo)`) surfaces as an error rather than silently
 /// succeeding — that would mask a real misconfiguration.
+/// Borrow the git capability for a repo side effect, erroring when git is off.
+///
+/// Repo side effects only run behind kind:30617/30618 ingest, which the
+/// capability gate already refuses when git is disabled — so this is the
+/// belt to that braces, not a live code path.
+fn git_capability(state: &Arc<AppState>) -> anyhow::Result<&crate::state::GitCapability> {
+    state.git.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("git capability is disabled on this relay (BUZZ_CAPABILITY_GIT)")
+    })
+}
+
 async fn seed_manifest_pointer(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -2607,6 +2618,11 @@ async fn seed_manifest_pointer(
     use crate::api::git::manifest::{pointer_key, Manifest, MANIFEST_VERSION};
     use crate::api::git::store::{CasOutcome, Precond};
     use std::collections::BTreeMap;
+
+    // Unreachable in practice: with the git capability off, kind:30617 is
+    // refused at ingest before any repo side effect runs. Kept as an error
+    // rather than an unwrap so the capability boundary stays total.
+    let git = git_capability(state)?;
 
     // The empty manifest. All empty manifests across all repos share canonical
     // bytes — by design — so `put_manifest` is idempotent at the store level
@@ -2624,8 +2640,8 @@ async fn seed_manifest_pointer(
     let bytes = empty
         .canonical_bytes()
         .map_err(|e| anyhow::anyhow!("empty manifest serialize: {e}"))?;
-    let manifest_key = state
-        .git_store
+    let manifest_key = git
+        .store
         .put_manifest(&bytes)
         .await
         .map_err(|e| anyhow::anyhow!("put_manifest: {e}"))?;
@@ -2634,8 +2650,8 @@ async fn seed_manifest_pointer(
         .ok_or_else(|| anyhow::anyhow!("put_manifest returned non-standard key: {manifest_key}"))?;
 
     let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
-    let outcome = state
-        .git_store
+    let outcome = git
+        .store
         .put_pointer(&pkey, digest.as_bytes(), Precond::IfNoneMatchStar)
         .await
         .map_err(|e| anyhow::anyhow!("put_pointer: {e}"))?;
@@ -2646,8 +2662,8 @@ async fn seed_manifest_pointer(
             // if it names the same empty manifest digest. Any other value is
             // either a stale pointer from a prior repo lifecycle for the same
             // (owner, repo) or a real misconfiguration — surface, don't swallow.
-            let (_etag, body) = state
-                .git_store
+            let (_etag, body) = git
+                .store
                 .get_pointer(&pkey)
                 .await
                 .map_err(|e| anyhow::anyhow!("re-read pointer after LostRace: {e}"))?
@@ -2696,8 +2712,8 @@ async fn ensure_manifest_pointer(
     use crate::api::git::manifest::pointer_key;
 
     let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
-    let existing = state
-        .git_store
+    let existing = git_capability(state)?
+        .store
         .get_pointer(&pkey)
         .await
         .map_err(|e| anyhow::anyhow!("get_pointer: {e}"))?;

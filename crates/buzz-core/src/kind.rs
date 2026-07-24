@@ -529,6 +529,34 @@ pub const KIND_GIT_STATUS_CLOSED: u32 = 1632;
 /// NIP-34: Status — Draft.
 pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 
+/// Every NIP-34 kind the relay accepts on behalf of its git capability.
+///
+/// When the git capability is switched off (`BUZZ_CAPABILITY_GIT=false`, the
+/// default under `BUZZ_PROFILE=solo`) the relay has no object store, no git
+/// smart-HTTP routes, and no manifest pointers — so these kinds are rejected
+/// at ingest rather than accepted into a store that can never serve them.
+/// See [`is_git_kind`].
+pub const GIT_KINDS: &[u32] = &[
+    KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE,
+    KIND_GIT_PATCH,
+    KIND_GIT_PULL_REQUEST,
+    KIND_GIT_PR_UPDATE,
+    KIND_GIT_ISSUE,
+    KIND_GIT_STATUS_OPEN,
+    KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_CLOSED,
+    KIND_GIT_STATUS_DRAFT,
+];
+
+/// Returns `true` if `kind` belongs to the NIP-34 git family ([`GIT_KINDS`]).
+///
+/// Callers use this to gate ingest on the relay's git capability; it is a
+/// pure classification and says nothing about whether git is enabled.
+pub fn is_git_kind(kind: u32) -> bool {
+    GIT_KINDS.contains(&kind)
+}
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -820,6 +848,24 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn git_kinds_are_registered_and_classified() {
+        for &k in GIT_KINDS {
+            assert!(
+                ALL_KINDS.contains(&k),
+                "git kind {k} must also be a registered kind"
+            );
+            assert!(
+                is_git_kind(k),
+                "is_git_kind must accept registered git kind {k}"
+            );
+        }
+        // A neighbouring NIP-34 kind we deliberately do not register, plus a
+        // core chat kind, must not be swept into the git capability gate.
+        assert!(!is_git_kind(1620));
+        assert!(!is_git_kind(KIND_STREAM_MESSAGE));
     }
 
     #[test]

@@ -45,9 +45,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(media_body_limit))
         .with_state(state.clone());
 
-    let git_router = api::git::git_router(state.clone());
-
-    let git_policy_router = api::git::git_policy_router(state.clone());
+    // Git capability off ⇒ smart-HTTP transport and the policy hooks are not
+    // mounted at all, so every git path 404s like any other unknown route.
+    // `state.git` is `None` in that case, so the handlers would have nothing
+    // to serve anyway — not mounting them keeps the surface honest.
+    let git_routers = state.config.capabilities.git.then(|| {
+        (
+            api::git::git_router(state.clone()),
+            api::git::git_policy_router(state.clone()),
+        )
+    });
 
     let admin_enabled = state.config.admin.is_some();
     let admin_web_dir = state
@@ -132,10 +139,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Merge — each sub-router carries its own body limit.
     // Metrics → Trace → CORS applied once over the combined router.
-    let mut merged = api_router
-        .merge(media_router)
-        .merge(git_router)
-        .merge(git_policy_router);
+    let mut merged = api_router.merge(media_router);
+    if let Some((git_router, git_policy_router)) = git_routers {
+        merged = merged.merge(git_router).merge(git_policy_router);
+    }
     if let Some(admin_router) = admin_router {
         merged = merged.merge(admin_router);
     }
@@ -148,7 +155,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         let admin_files = admin_web_dir.map(ServeDir::new);
         let web_index = web_dir.as_ref().map(|dir| dir.join("index.html"));
         let web_files = web_dir.map(ServeDir::new);
-        let serve_git_web_gui = state.config.serve_git_web_gui;
+        // The repo-browser SPA only ever talks to the git smart-HTTP routes,
+        // so serving it with the capability off would hand users a UI whose
+        // every request 404s. Opt-in AND capability, not either.
+        let serve_git_web_gui = state.config.serve_git_web_gui && state.config.capabilities.git;
         let fallback_state = state.clone();
         let spa_fallback = tower::service_fn(move |req: axum::extract::Request| {
             let admin_index = admin_index.clone();
@@ -433,6 +443,76 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     use super::*;
+
+    /// Infra-free `AppState` for router-shape assertions: in-process backends
+    /// (no Redis), a lazy Postgres pool (never connected — these tests never
+    /// reach a handler that queries), and a temp pack-cache directory so the
+    /// git-on case does not write into the working tree.
+    fn capability_test_state(git: bool, scratch: &std::path::Path) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.capabilities.git = git;
+        config.git_pack_cache_path = scratch.to_path_buf();
+        config.admin = None;
+        config.web_dir = None;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            crate::state::RelayBackends::in_process(),
+            None,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    async fn git_info_refs_status(state: Arc<AppState>) -> axum::http::StatusCode {
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/git/alice/demo/info/refs?service=git-upload-pack")
+            .body(axum::body::Body::empty())
+            .expect("build git request");
+        build_router(state)
+            .oneshot(request)
+            .await
+            .expect("router responds")
+            .status()
+    }
+
+    /// The capability decides whether the git surface exists at all: with it
+    /// off the path is simply not a route, so it 404s like any unknown URL —
+    /// no handler runs and no `GitStore` was ever constructed. With it on the
+    /// route is mounted and answers from its own auth layer instead.
+    #[tokio::test]
+    async fn git_routes_are_mounted_only_when_the_capability_is_on() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+
+        let off = git_info_refs_status(capability_test_state(false, scratch.path())).await;
+        assert_eq!(
+            off,
+            axum::http::StatusCode::NOT_FOUND,
+            "git routes must not be mounted when BUZZ_CAPABILITY_GIT is off"
+        );
+
+        let on = git_info_refs_status(capability_test_state(true, scratch.path())).await;
+        assert_ne!(
+            on,
+            axum::http::StatusCode::NOT_FOUND,
+            "git routes must be mounted when the capability is on (auth rejects, routing does not)"
+        );
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {

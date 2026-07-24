@@ -60,6 +60,94 @@ pub enum StateBackend {
     InProcess,
 }
 
+/// Optional relay subsystems, switched on or off as a whole (Hive plan §5.3).
+///
+/// A capability is a subsystem the relay can run entirely without: no state
+/// constructed, no routes mounted, no background queries, and its event kinds
+/// refused at ingest with a machine-readable reason. This is one uniform block
+/// rather than a scatter of per-subsystem toggles so that "what does this
+/// deployment actually run?" has a single answer.
+///
+/// Every capability defaults **on** so an existing deployment upgrading with
+/// untouched environment behaves identically — except where the zero-service
+/// `solo` profile needs otherwise (see [`Capabilities::from_env`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Git-on-object-storage: `git_router` + `git_policy_router`, the
+    /// [`crate::api::git::store::GitStore`] / pack cache on `AppState`, the
+    /// NIP-34 kind family at ingest, the A3 conformance probe, the git web
+    /// GUI fallback, and the `buzz_*_git_repos` usage gauges.
+    ///
+    /// `BUZZ_CAPABILITY_GIT`. Defaults **on**, except under
+    /// `BUZZ_PROFILE=solo` where it defaults **off**: the git object store is
+    /// S3-only today, so a zero-service boot has nothing to back it.
+    pub git: bool,
+
+    /// Huddle (voice) audio relaying — the in-process `AudioRoomManager` that
+    /// forwards audio frames between peers in the same huddle.
+    ///
+    /// `BUZZ_CAPABILITY_HUDDLE_AUDIO`, with the older
+    /// `BUZZ_HUDDLE_AUDIO_AVAILABLE` still honoured as an alias.
+    ///
+    /// Audio frames are relayed peer-to-peer *within a single pod* (only
+    /// huddle lifecycle events cross pods via Redis). Under horizontal
+    /// scaling two peers in the same huddle can land on different pods and
+    /// never hear each other, so a multi-pod deployment turns this off and
+    /// the relay surfaces a clear, client-handleable "huddle audio
+    /// unavailable" signal on join instead of a silent split room.
+    ///
+    /// Defaults **on** so single-pod (N=1) deployments keep today's behavior.
+    pub huddle_audio: bool,
+}
+
+impl Capabilities {
+    /// Reads the `[capabilities]` block from the environment.
+    ///
+    /// `solo_profile` is the already-resolved `BUZZ_PROFILE=solo` decision; it
+    /// only moves *defaults*, never overrides an explicit variable.
+    ///
+    /// Precedence for huddle audio, highest first:
+    /// 1. `BUZZ_CAPABILITY_HUDDLE_AUDIO` — the canonical variable.
+    /// 2. `BUZZ_HUDDLE_AUDIO_AVAILABLE` — legacy alias, retained for
+    ///    deployments (and Helm charts) that already set it. Parsed with its
+    ///    original lenient semantics (`false`/`0` disable, anything else
+    ///    enables) so no existing deployment changes behavior.
+    /// 3. Default `true`.
+    fn from_env(solo_profile: bool) -> Result<Self, ConfigError> {
+        let git = parse_capability_flag("BUZZ_CAPABILITY_GIT", !solo_profile)?;
+
+        // Legacy alias resolves the default the canonical variable falls back
+        // to, so setting only the old variable keeps working unchanged.
+        let huddle_audio_default = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
+            .map(|v| !(v == "false" || v == "0"))
+            .unwrap_or(true);
+        let huddle_audio =
+            parse_capability_flag("BUZZ_CAPABILITY_HUDDLE_AUDIO", huddle_audio_default)?;
+
+        Ok(Self { git, huddle_audio })
+    }
+}
+
+/// Parses a capability boolean, rejecting values that are neither truthy nor
+/// falsy rather than silently defaulting.
+///
+/// Silent coercion is how `BUZZ_CAPABILITY_GIT=flase` becomes a relay that
+/// serves git when the operator meant to turn it off; capabilities decide
+/// which subsystems exist, so a typo must fail the boot loudly.
+fn parse_capability_flag(var: &str, default: bool) -> Result<bool, ConfigError> {
+    match std::env::var(var) {
+        Err(_) => Ok(default),
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(default),
+            "true" | "1" | "on" | "yes" => Ok(true),
+            "false" | "0" | "off" | "no" => Ok(false),
+            other => Err(ConfigError::InvalidValue(format!(
+                "{var} must be a boolean ('true'/'false', '1'/'0', 'on'/'off', 'yes'/'no'), got '{other}'"
+            ))),
+        },
+    }
+}
+
 /// Deny-by-default read-only deployment-admin configuration.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
@@ -166,22 +254,12 @@ pub struct Config {
     /// are permitted regardless of auth method (API token, NIP-42).
     pub require_relay_membership: bool,
 
-    /// Whether this deployment can serve huddle (voice) audio.
+    /// Optional subsystems this deployment runs (`BUZZ_CAPABILITY_*`).
     ///
-    /// Huddle audio frames are relayed peer-to-peer *within a single pod*
-    /// (`AudioRoomManager` is an in-process map; only huddle lifecycle events
-    /// cross pods via Redis). Under horizontal scaling (any-pod-any-connection,
-    /// plan §4 fork B) two peers in the same huddle can land on different pods
-    /// and never hear each other. Rather than sticky-route huddles or ship a
-    /// silent split-room (plan §5b, decided by Tyler), a horizontally-scaled
-    /// deployment sets this `false` and the relay surfaces a clear, client-
-    /// handleable "huddle audio unavailable" signal on join.
-    ///
-    /// Defaults to `true` so single-pod deployments (the N=1 case) keep today's
-    /// behavior unchanged. Operators running multiple relay pods MUST set
-    /// `BUZZ_HUDDLE_AUDIO_AVAILABLE=false` until the out-of-relay media/SFU
-    /// service lands.
-    pub huddle_audio_available: bool,
+    /// A capability that is off constructs no state, mounts no routes, runs no
+    /// background work, and refuses its event kinds at ingest. See
+    /// [`Capabilities`] for the per-capability contract and defaults.
+    pub capabilities: Capabilities,
 
     /// Inter-relay mesh configuration (`BUZZ_MESH`, `BUZZ_MESH_BIND_ADDR`).
     /// Opt-in: mesh forms only when `BUZZ_MESH=on` is explicit. The default
@@ -580,11 +658,10 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        // Defaults true → single-pod (N=1) keeps today's huddle behavior. A
-        // horizontally-scaled deployment sets this false; see the field doc.
-        let huddle_audio_available = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
-            .map(|v| !(v == "false" || v == "0"))
-            .unwrap_or(true);
+        // Uniform `[capabilities]` block. `git` defaults off under the solo
+        // profile (S3-only object store); `huddle_audio` defaults on so
+        // single-pod (N=1) keeps today's behavior. See `Capabilities`.
+        let capabilities = Capabilities::from_env(solo_profile)?;
 
         // Mesh opt-in: default OFF. Strict rollout no-regression — an image
         // upgrade with untouched env must not bind a new UDP port or write a
@@ -1100,7 +1177,7 @@ impl Config {
             metrics_port,
             pubkey_allowlist_enabled,
             require_relay_membership,
-            huddle_audio_available,
+            capabilities,
             mesh,
             mesh_demo_echo,
             relay_owner_pubkey,
@@ -1187,8 +1264,12 @@ mod tests {
             "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
         );
         assert!(
-            config.huddle_audio_available,
-            "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+            config.capabilities.huddle_audio,
+            "huddle audio should default to on so single-pod (N=1) keeps today's huddle behavior"
+        );
+        assert!(
+            config.capabilities.git,
+            "git should default to on so an existing deployment upgrading with untouched env is unchanged"
         );
     }
 
@@ -1436,15 +1517,133 @@ mod tests {
         ));
     }
 
+    /// Clears every variable that participates in the capability block so a
+    /// matrix case only exercises what it sets.
+    fn clear_capability_env() {
+        std::env::remove_var("BUZZ_PROFILE");
+        std::env::remove_var("BUZZ_CAPABILITY_GIT");
+        std::env::remove_var("BUZZ_CAPABILITY_HUDDLE_AUDIO");
+        std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
+    }
+
     #[test]
-    fn huddle_audio_available_can_be_disabled_for_horizontal_scaling() {
+    fn legacy_huddle_audio_available_alias_still_disables_audio() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        clear_capability_env();
         std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
         let config = Config::from_env().expect("config");
-        std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
+        clear_capability_env();
         assert!(
-            !config.huddle_audio_available,
+            !config.capabilities.huddle_audio,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
+        );
+    }
+
+    #[test]
+    fn capability_huddle_audio_var_overrides_legacy_alias() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Canonical variable wins over the legacy alias in both directions.
+        clear_capability_env();
+        std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "true");
+        std::env::set_var("BUZZ_CAPABILITY_HUDDLE_AUDIO", "false");
+        let canonical_off = Config::from_env().expect("config");
+
+        clear_capability_env();
+        std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
+        std::env::set_var("BUZZ_CAPABILITY_HUDDLE_AUDIO", "true");
+        let canonical_on = Config::from_env().expect("config");
+
+        clear_capability_env();
+
+        assert!(
+            !canonical_off.capabilities.huddle_audio,
+            "BUZZ_CAPABILITY_HUDDLE_AUDIO must take precedence over the legacy alias"
+        );
+        assert!(
+            canonical_on.capabilities.huddle_audio,
+            "BUZZ_CAPABILITY_HUDDLE_AUDIO=true must re-enable audio the legacy alias disabled"
+        );
+    }
+
+    #[test]
+    fn git_capability_defaults_on_but_off_under_solo_profile() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        clear_capability_env();
+        let default_profile = Config::from_env().expect("config");
+
+        clear_capability_env();
+        std::env::set_var("BUZZ_PROFILE", "solo");
+        let solo = Config::from_env().expect("config");
+
+        clear_capability_env();
+
+        assert!(
+            default_profile.capabilities.git,
+            "git must default on so a served deployment upgrading with untouched env is unchanged"
+        );
+        assert!(
+            !solo.capabilities.git,
+            "git must default off under BUZZ_PROFILE=solo — the object store is S3-only"
+        );
+        assert!(
+            solo.capabilities.huddle_audio,
+            "solo must keep huddle audio: it is in-process and needs no external service"
+        );
+    }
+
+    #[test]
+    fn explicit_git_capability_overrides_either_profile_default() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        clear_capability_env();
+        std::env::set_var("BUZZ_CAPABILITY_GIT", "false");
+        let default_profile_off = Config::from_env().expect("config");
+
+        clear_capability_env();
+        std::env::set_var("BUZZ_PROFILE", "solo");
+        std::env::set_var("BUZZ_CAPABILITY_GIT", "true");
+        let solo_on = Config::from_env().expect("config");
+
+        clear_capability_env();
+
+        assert!(
+            !default_profile_off.capabilities.git,
+            "BUZZ_CAPABILITY_GIT=false must turn git off on the default profile"
+        );
+        assert!(
+            solo_on.capabilities.git,
+            "BUZZ_CAPABILITY_GIT=true must turn git on under solo (solo + real S3 is legitimate)"
+        );
+    }
+
+    #[test]
+    fn capability_flags_accept_common_spellings_and_reject_typos() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_capability_env();
+
+        for truthy in ["true", "1", "on", "yes", "TRUE", " On "] {
+            std::env::set_var("BUZZ_CAPABILITY_GIT", truthy);
+            let config = Config::from_env().expect("config");
+            assert!(config.capabilities.git, "'{truthy}' should parse as true");
+        }
+        for falsy in ["false", "0", "off", "no", "FALSE", " Off "] {
+            std::env::set_var("BUZZ_CAPABILITY_GIT", falsy);
+            let config = Config::from_env().expect("config");
+            assert!(!config.capabilities.git, "'{falsy}' should parse as false");
+        }
+
+        std::env::set_var("BUZZ_CAPABILITY_GIT", "flase");
+        let typo = Config::from_env();
+        clear_capability_env();
+        assert!(
+            matches!(
+                typo,
+                Err(ConfigError::InvalidValue(ref message))
+                    if message.contains("BUZZ_CAPABILITY_GIT")
+            ),
+            "a capability typo must fail the boot loudly, not silently default"
         );
     }
 

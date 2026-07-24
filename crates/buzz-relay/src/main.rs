@@ -534,43 +534,55 @@ async fn main() -> anyhow::Result<()> {
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
-    // Default ON for served deployments, OFF under `--profile solo`: the git
-    // object store is S3-only today (git capability gating is Phase 3), so a
-    // zero-service boot would fail this probe against a bucket that cannot
-    // exist. Explicitly setting BUZZ_GIT_CONFORMANCE_PROBE overrides either
-    // default — solo + real S3 config is a legitimate combination.
-    if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
-        .map(|v| v != "false")
-        .unwrap_or(!config.solo_profile)
-    {
-        let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32);
-        let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3);
-        let cfg = buzz_relay::api::git::store::ProbeConfig {
-            race_width,
-            race_rounds,
-        };
-        tracing::info!(
-            race_width,
-            race_rounds,
-            "running git object-store conformance probe (A3 gate)"
-        );
-        let report = state
-            .git_store
-            .run_conformance_probe(cfg)
-            .await
-            .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
-        tracing::info!(
-            race_width = report.race_width,
-            race_rounds = report.race_rounds,
-            transport_drops = report.transport_drops,
-            "git object-store backend admitted: A3 conformance probe passed"
-        );
+    //
+    // Two independent gates, both of which must open:
+    //
+    // 1. The git capability. With git off there is no `GitStore` to probe and
+    //    nothing the probe would protect, so it is skipped unconditionally —
+    //    `BUZZ_GIT_CONFORMANCE_PROBE` cannot force a probe onto a relay that
+    //    has no object store.
+    // 2. `BUZZ_GIT_CONFORMANCE_PROBE`, defaulting ON for served deployments
+    //    and OFF under `--profile solo`. The solo default stays keyed on the
+    //    profile rather than the capability so that turning git on in solo
+    //    (`BUZZ_CAPABILITY_GIT=true`, e.g. pointing at a real bucket, or a
+    //    dev box with none) still boots exactly as it did before — the probe
+    //    there remains an explicit opt-in.
+    if let Some(git) = state.git.as_ref() {
+        if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
+            .map(|v| v != "false")
+            .unwrap_or(!config.solo_profile)
+        {
+            let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3);
+            let cfg = buzz_relay::api::git::store::ProbeConfig {
+                race_width,
+                race_rounds,
+            };
+            tracing::info!(
+                race_width,
+                race_rounds,
+                "running git object-store conformance probe (A3 gate)"
+            );
+            let report = git
+                .store
+                .run_conformance_probe(cfg)
+                .await
+                .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
+            tracing::info!(
+                race_width = report.race_width,
+                race_rounds = report.race_rounds,
+                transport_drops = report.transport_drops,
+                "git object-store backend admitted: A3 conformance probe passed"
+            );
+        }
+    } else {
+        tracing::info!("git capability disabled — skipping A3 conformance probe and git routes");
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -1571,7 +1583,13 @@ async fn emit_db_usage_metrics(
     let message_rows = state.db.usage_message_counts().await?;
     let relay_member_rows = state.db.usage_relay_member_counts().await?;
     let workflow_rows = state.db.usage_workflow_counts().await?;
-    let git_repo_rows = state.db.usage_git_repo_counts().await?;
+    // Git capability off ⇒ the query never runs. A relay that cannot host
+    // repositories should not be paying for a per-tick GROUP BY over them,
+    // and emitting a constant 0 would read as "repos were deleted".
+    let git_repo_rows = match state.config.capabilities.git {
+        true => Some(state.db.usage_git_repo_counts().await?),
+        false => None,
+    };
     let active_users_1d = state.db.usage_active_user_counts("1 day").await?;
     let active_users_7d = state.db.usage_active_user_counts("7 days").await?;
     let active_users_30d = state.db.usage_active_user_counts("30 days").await?;
@@ -1779,8 +1797,9 @@ async fn emit_db_usage_metrics(
     }
 
     // buzz_community_git_repos{community}
-    // Emit 0 for communities with no repos.
-    {
+    // Emit 0 for communities with no repos. Skipped entirely (no series at
+    // all) when the git capability is off — see the collection phase above.
+    if let Some(git_repo_rows) = git_repo_rows {
         let rows: HashMap<Uuid, i64> = git_repo_rows
             .into_iter()
             .map(|r| (r.community_id, r.count))

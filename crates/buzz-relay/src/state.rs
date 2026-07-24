@@ -540,6 +540,26 @@ impl Default for ConnectionManager {
     }
 }
 
+/// Everything the git capability owns, bundled so a single `Option` on
+/// [`AppState`] gates the whole subsystem (Hive plan §5.3).
+///
+/// Constructed only when `config.capabilities.git` is on. Absence is the
+/// authoritative "this relay does not do git" signal: no S3 client is built,
+/// no pack-cache directory is created, `git_router`/`git_policy_router` are
+/// not mounted, NIP-34 kinds are refused at ingest, the A3 conformance probe
+/// is skipped, and the git usage gauges are not polled.
+#[derive(Clone)]
+pub struct GitCapability {
+    /// Git object-store backend (content-addressed packs/manifests plus
+    /// CAS-guarded manifest pointer). This is the durable git source of truth;
+    /// see `api::git::store` and `docs/git-on-object-storage.md`.
+    pub store: crate::api::git::store::GitStore,
+    /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
+    /// Object storage remains authoritative; this only avoids repeated reads
+    /// and index generation for content-addressed packs.
+    pub pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
+}
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -621,14 +641,11 @@ pub struct AppState {
     /// `storage_sweep` module docs; shared with the usage-metrics tick via
     /// `Arc` the same way other cross-tick poller state lives on `AppState`.
     pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,
-    /// Git object-store backend (content-addressed packs/manifests plus
-    /// CAS-guarded manifest pointer). This is the durable git source of truth;
-    /// see `api::git::store` and `docs/git-on-object-storage.md`.
-    pub git_store: crate::api::git::store::GitStore,
-    /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
-    /// Object storage remains authoritative; this only avoids repeated reads
-    /// and index generation for content-addressed packs.
-    pub git_pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
+    /// Git capability state, present only when `config.capabilities.git` is
+    /// enabled. `None` ⇒ the relay constructed no object-store client and no
+    /// pack cache, mounted no git routes, and refuses NIP-34 kinds at ingest —
+    /// one `if let` gates the whole subsystem. See [`GitCapability`].
+    pub git: Option<GitCapability>,
     /// Audio relay room manager — tracks active huddle audio rooms.
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
@@ -754,22 +771,29 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
-            &config.media.s3_endpoint,
-            &config.media.s3_access_key,
-            &config.media.s3_secret_key,
-            &config.media.s3_bucket,
-            &config.media.s3_region,
-        )
-        .expect("media storage was already constructed with this S3 config");
-        let git_pack_cache = Arc::new(
-            crate::api::git::pack_cache::GitPackCache::new(
-                &config.git_pack_cache_path,
-                config.git_pack_cache_max_bytes,
-                config.git_pack_cache_max_concurrent_populations,
+        // Git capability: with it off nothing here is constructed — no S3
+        // client, no pack-cache directory on disk. That is what lets a
+        // zero-service (`--profile solo`) boot come up without an object
+        // store at all.
+        let git = config.capabilities.git.then(|| {
+            let store = crate::api::git::store::GitStore::new(
+                &config.media.s3_endpoint,
+                &config.media.s3_access_key,
+                &config.media.s3_secret_key,
+                &config.media.s3_bucket,
+                &config.media.s3_region,
             )
-            .expect("git pack cache path must be available"),
-        );
+            .expect("media storage was already constructed with this S3 config");
+            let pack_cache = Arc::new(
+                crate::api::git::pack_cache::GitPackCache::new(
+                    &config.git_pack_cache_path,
+                    config.git_pack_cache_max_bytes,
+                    config.git_pack_cache_max_concurrent_populations,
+                )
+                .expect("git pack cache path must be available"),
+            );
+            GitCapability { store, pack_cache }
+        });
         let RelayBackends {
             pubsub,
             shared_state,
@@ -834,8 +858,7 @@ impl AppState {
             storage_sweep: Arc::new(tokio::sync::Mutex::new(
                 crate::storage_sweep::StorageSweepState::default(),
             )),
-            git_store,
-            git_pack_cache,
+            git,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
