@@ -113,6 +113,9 @@ fi
 # The deployment community (host=localhost:3000) is auto-ensured at boot from
 # RELAY_URL — no seeding step. The git A3 conformance probe is disabled: it
 # gates the S3 pointer-CAS protocol, which the Solo profile does not serve.
+# The WS admission budget is raised because the subscription-limit test opens
+# 1024 REQs in a burst to exercise MAX_SUBSCRIPTIONS — impossible under the
+# default 10/s x 5s window.
 
 log "Starting Solo relay (sqlite + inproc messaging + local media)..."
 nohup env \
@@ -126,6 +129,7 @@ nohup env \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
+  BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC=1000 \
   "./target/$(profile_dir "${CARGO_PROFILE}")/buzz-relay" > "${RELAY_LOG}" 2>&1 &
 echo $! > "${RELAY_PID_FILE}"
 

@@ -140,12 +140,11 @@ async fn ensure_test_community(host: &str) -> uuid::Uuid {
             .await
             .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
 
-            let id_text: String =
-                sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")
-                    .bind(host)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap_or_else(|e| panic!("lookup community {host}: {e}"));
+            let id_text: String = sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")
+                .bind(host)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("lookup community {host}: {e}"));
             id_text
                 .parse()
                 .unwrap_or_else(|e| panic!("community id {id_text} is not a uuid: {e}"))
@@ -882,7 +881,7 @@ async fn test_subscription_limit_enforced() {
         client
             .collect_until_eose(&sid, Duration::from_secs(5))
             .await
-            .expect("EOSE");
+            .unwrap_or_else(|e| panic!("EOSE for sub {i}: {e:?}"));
     }
 
     let overflow_sid = sub_id("overflow");
@@ -1256,6 +1255,14 @@ async fn test_unarchive_emits_member_added_notification() {
     ws.collect_until_eose(&sid, Duration::from_secs(5))
         .await
         .expect("membership feed EOSE");
+
+    // Cross an epoch-second boundary before toggling: the unarchive-time 44100
+    // carries the same pubkey/kind/tags/content as the creation-time 44100, so
+    // landing in the same created_at second collides event ids and insert_event
+    // skips the fan-out (the known limitation documented at the emit site in
+    // side_effects.rs). On an all-local backend the whole test fits in one
+    // second, making that collision deterministic rather than flaky.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
 
     // Archive, then unarchive, the channel via kind:9002 edit-metadata.
     for archived in ["true", "false"] {
