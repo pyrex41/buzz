@@ -216,11 +216,36 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 ---
 
+## Deploy
+
+Running your own relay takes one binary and no services:
+
+```bash
+cargo build --release -p buzz-relay
+./target/release/buzz-relay --profile solo
+```
+
+The Solo profile is SQLite storage, in-process messaging, and local-filesystem
+media — no Postgres, no Redis, no S3. It creates `./data/buzz.db` on first boot
+and serves on `:3000`. Or in Docker:
+
+```bash
+cd deploy/compose && docker compose -f solo.yml up -d
+```
+
+**[docs/deploy-solo-quickstart.md](docs/deploy-solo-quickstart.md)** covers all
+three deployment shapes — bare binary, Compose Solo, and a two-node ZeroMQ pair
+on Postgres — plus the environment variable reference, data layout, backups,
+and what Solo deliberately leaves out.
+
+---
+
 ## Going further
 
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
+- **[docs/deploy-solo-quickstart.md](docs/deploy-solo-quickstart.md)** — self-hosting: Solo profile, Docker Compose, ZMQ pair
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 
 <details>

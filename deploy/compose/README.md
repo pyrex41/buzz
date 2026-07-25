@@ -3,6 +3,37 @@
 This is the single-node/VPS deployment bundle. It is intentionally separate from
 the root `docker-compose.yml`, which remains local development infrastructure.
 
+## Which file do I want?
+
+| File | Services | Shape |
+|---|---|---|
+| `solo.yml` | 1 (relay only) | Solo profile: SQLite + in-process messaging + local-FS media. No `.env` needed. |
+| `postgres-redis.yml` | 3 | Minimal served topology: relay + Postgres + Redis, local-FS media. |
+| `compose.yml` | 5 | **Reference production stack**: adds MinIO/S3 media and the git object store. Pairs with `compose.caddy.yml` (TLS) and `compose.dev.yml` (exposed ports, Adminer, Prometheus). |
+| `zmq-pair.yml` | 4 | **Experimental**: two relays in a ZeroMQ static mesh over shared Postgres. |
+
+`compose.yml` remains the file `run.sh` drives and the one to use in
+production. The others are narrower starting points.
+
+Narrative walkthroughs of the Solo and ZMQ-pair shapes — env var reference,
+data layout, backups, scope cuts — live in
+[`docs/deploy-solo-quickstart.md`](../../docs/deploy-solo-quickstart.md).
+
+### Solo in one command
+
+```bash
+mkdir -p data && sudo chown 1000:1000 data   # image runs as uid 1000
+docker compose -f solo.yml up -d
+```
+
+### ZeroMQ pair
+
+Note that ZeroMQ replaces Redis for **pub/sub fan-out only** — the relay's
+shared state (replay guard, rate limiter) still needs Redis, and the config
+layer rejects `BUZZ_STATE_BACKEND=inproc` whenever `BUZZ_ZMQ_PEERS` is set. So
+`zmq-pair.yml` still runs Redis by design. Soak a build against this topology
+with `./scripts/zmq-soak.sh` before trusting it.
+
 ## Quick start
 
 ```bash

@@ -1,0 +1,129 @@
+# =============================================================================
+# postgres-redis.yml — served profile: one relay + Postgres + Redis
+# =============================================================================
+# Today's production shape, reduced to its three load-bearing services. This is
+# the "served" counterpart to solo.yml: Postgres for the event store, Redis for
+# pub/sub fan-out and shared state (replay guard + rate limiter).
+#
+#   cd deploy/compose
+#   cp .env.example .env && $EDITOR .env      # set POSTGRES_PASSWORD, REDIS_PASSWORD
+#   docker compose -f postgres-redis.yml up -d
+#
+# Difference from compose.yml: this stack runs media on the local filesystem
+# (BUZZ_MEDIA_BACKEND=local) instead of MinIO/S3, so it needs three containers
+# instead of five. Use compose.yml when you want the full S3 media stack, the
+# git object store, or the Caddy TLS overlay — that file remains the reference
+# production deployment and this one is the minimal served topology.
+#
+# Git hosting is off here: the git object store is S3-backed, so it needs the
+# MinIO/S3 stack in compose.yml. Set BUZZ_CAPABILITY_GIT=true there, not here.
+
+name: hive-served
+
+services:
+  relay:
+    # Pin to a released tag in production; `:main` tracks HEAD.
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    environment:
+      # No BUZZ_PROFILE: the default (served) profile means postgres storage,
+      # redis messaging, and redis shared state — all three explicit below so
+      # this file documents the topology rather than relying on defaults.
+      BUZZ_DB_BACKEND: postgres
+      BUZZ_MESSAGING_BACKEND: redis
+      BUZZ_STATE_BACKEND: redis
+
+      DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-buzz}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+
+      # Local-FS media keeps this stack to three services. Swap to the S3
+      # backend (compose.yml) when you outgrow a single relay's disk.
+      BUZZ_MEDIA_BACKEND: local
+      BUZZ_MEDIA_PATH: /data/media
+
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+
+      RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      BUZZ_MEDIA_BASE_URL: ${BUZZ_MEDIA_BASE_URL:-http://localhost:3000/media}
+
+      # Opt-in, unlike Solo: a served deployment should migrate deliberately.
+      # Leave false and run `buzz-admin migrate` if you gate schema changes.
+      BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-true}
+
+      RUST_LOG: ${RUST_LOG:-buzz_relay=info,buzz_db=info,buzz_auth=info,buzz_pubsub=info}
+    ports:
+      - "${BUZZ_HTTP_PORT:-3000}:3000"
+      - "${BUZZ_HEALTH_PORT:-8080}:8080"
+    volumes:
+      - hive-media-data:/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  postgres:
+    # Pinned major; bump deliberately — a major upgrade needs a dump/restore.
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buzz}
+      POSTGRES_USER: ${POSTGRES_USER:-buzz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - hive-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - hive-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+volumes:
+  hive-postgres-data:
+    labels:
+      com.buzz.volume: postgres
+  hive-redis-data:
+    labels:
+      com.buzz.volume: redis
+  hive-media-data:
+    labels:
+      com.buzz.volume: media
+
+networks:
+  hive-net:
+    driver: bridge
+    labels:
+      com.buzz.network: served

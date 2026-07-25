@@ -1,0 +1,85 @@
+# =============================================================================
+# solo.yml — Hive Solo profile: one relay, zero external services
+# =============================================================================
+# The single-binary deployment story from the Hive plan (§8 Phase 2.5): SQLite
+# storage, in-process messaging, local-filesystem media. No Postgres, no Redis,
+# no MinIO. Everything lives under ./data next to this file.
+#
+#   cd deploy/compose
+#   mkdir -p data && sudo chown 1000:1000 data    # see "Volume ownership" below
+#   docker compose -f solo.yml up -d
+#   curl -fsS http://127.0.0.1:8080/_readiness
+#
+# This file is deliberately self-contained: it does NOT read .env, so it runs
+# with no configuration at all. compose.yml (Postgres + Redis + MinIO) remains
+# the served/production stack; see README.md.
+#
+# Volume ownership: the runtime image runs as uid/gid 1000 (user `buzz`, see
+# the root Dockerfile). A fresh bind-mounted ./data is created root-owned by
+# the Docker daemon, which the relay then cannot write. `chown 1000:1000 data`
+# once before first start. Swap the bind mount for the named-volume stanza at
+# the bottom if you would rather Docker manage ownership for you.
+#
+# Scope: Solo does not do push notifications, mesh/tunnel, or multiple relay
+# replicas — see docs/deploy-solo-quickstart.md and the plan's §5.4 scope cuts.
+
+name: hive-solo
+
+services:
+  relay:
+    # Pin to a released tag for anything you care about; `:main` tracks HEAD.
+    #   BUZZ_IMAGE=ghcr.io/block/buzz:sha-<7> docker compose -f solo.yml up -d
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    environment:
+      # THE configuration under test: one variable selects the whole backend
+      # trio (sqlite + inproc messaging + local-FS media) and turns on
+      # auto-migrate so the first boot creates the schema from nothing.
+      BUZZ_PROFILE: solo
+
+      # Data layout inside the container; ./data on the host.
+      BUZZ_SQLITE_PATH: /data/buzz.db
+      BUZZ_MEDIA_PATH: /data/media
+
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+
+      # Host-derived community boundary. Change both together when you put the
+      # relay behind a real hostname (and use wss:// once TLS terminates).
+      RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      BUZZ_MEDIA_BASE_URL: ${BUZZ_MEDIA_BASE_URL:-http://localhost:3000/media}
+
+      RUST_LOG: ${RUST_LOG:-buzz_relay=info,buzz_db=info,buzz_auth=info}
+    ports:
+      - "${BUZZ_HTTP_PORT:-3000}:3000"
+      - "${BUZZ_HEALTH_PORT:-8080}:8080"
+      # Prometheus scrape target. Drop this line to keep metrics off the host.
+      - "${BUZZ_METRICS_PORT:-9102}:9102"
+    volumes:
+      - ./data:/data
+    # Probe /_readiness over /dev/tcp rather than curl so the check keeps
+    # working on a minimal runtime image (same pattern as compose.yml).
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+# Named-volume alternative to the ./data bind mount above. Docker creates it
+# with the right ownership, at the cost of `docker run --rm -v` gymnastics when
+# you want to copy the SQLite file out for a backup. To use it: comment out the
+# `- ./data:/data` line above, uncomment the two blocks below.
+#
+#    volumes:
+#      - hive-solo-data:/data
+#
+# volumes:
+#   hive-solo-data:
+#     labels:
+#       com.buzz.volume: solo-data
