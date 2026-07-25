@@ -26,6 +26,9 @@
 #   e2e_media          Blossom upload/download on the local-FS media backend
 #   e2e_workstream     Hive Workstream kinds (35000-35003 NIP-33 heads +
 #                      47001-47030 append-only history)
+#   e2e_workstream_review
+#                      multi-party review cycle: human + spec-writer + critic,
+#                      asserting each party observes the others' writes
 #
 # Not run here (documented gaps, not accidents):
 #   e2e_git            git-on-object-storage needs an S3-style backend; the
@@ -169,7 +172,7 @@ if [[ -n "${NEXTEST_ARCHIVE}" ]]; then
     DATABASE_URL="sqlite:${SOLO_DIR}/buzz.db" \
     cargo nextest run \
       --archive-file "${NEXTEST_ARCHIVE}" \
-      -E 'binary(e2e_relay) or binary(e2e_nostr_interop) or binary(e2e_media) or binary(e2e_workstream)' \
+      -E 'binary(e2e_relay) or binary(e2e_nostr_interop) or binary(e2e_media) or binary(e2e_workstream) or binary(e2e_workstream_review)' \
       --run-ignored ignored-only || test_status=$?
 else
   env \
@@ -181,6 +184,7 @@ else
       --test e2e_nostr_interop \
       --test e2e_media \
       --test e2e_workstream \
+      --test e2e_workstream_review \
       -- --ignored || test_status=$?
 fi
 

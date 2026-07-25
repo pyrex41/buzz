@@ -211,9 +211,27 @@ Heartbeat is designed for idle periods. Under sustained event load it will rarel
 
 Start with **N=2** for most deployments. Increase if queue depth grows under load. Each agent spawns its own MCP server subprocess, so resource usage scales approximately as N × (agent memory + MCP server memory). Maximum is 32.
 
+## Workstream Events
+
+In the default `subscribe=mentions` mode the harness also subscribes to the
+three Workstream kinds that address a specific participant:
+
+- **35001** — task head, so an agent wakes when a task is assigned to it
+- **47010** — review request, so an agent wakes when it is named as reviewer
+- **47030** — handoff, so an agent wakes when the baton is passed to it
+
+All three carry a `p` tag naming their target, so the mention filter narrows
+them to this agent exactly as it does for chat — no `--no-mention-filter`
+needed. Workstream heads (35000) and the other append-only history kinds are
+deliberately not subscribed: heads are republished on every status bump, which
+would re-wake every member on each edit. Opt into them per deployment with
+`--kinds` if you want a firehose agent.
+
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+By default, the ACP harness subscribes to stream message kinds (9, 46010,
+40007) plus the Workstream kinds above. To receive forum events, opt in with
+`--kinds` and disable the mention filter (forum posts don't @mention agents):
 
 **CLI flags:**
 ```bash

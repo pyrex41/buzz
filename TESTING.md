@@ -262,6 +262,102 @@ Replies are kind:9 in the same channel; `buzz messages thread --channel <id>
 
 ---
 
+## Multi-agent Workstream review cycle
+
+Two agents and a human completing a review cycle in a `hardware` workstream —
+no git, no code. This is the Hive Phase 4 exit criterion, and it is the
+scenario the `hive-workstream` persona pack is written against.
+
+### Personas
+
+`crates/buzz-persona/packs/hive-workstream/` ships six non-code personas:
+
+| Agent | Persona file | Role |
+|-------|--------------|------|
+| Bramble | `coordinator.persona.md` | Owns the workstream head, task board, handoffs |
+| Quill | `spec-writer.persona.md` | Artifacts, versions, review requests |
+| Vex | `critic.persona.md` | Threaded review comments and verdicts |
+| Ledger | `decision-log.persona.md` | Decision records and supersede chains |
+| Sprocket | `bringup.persona.md` | Experiment logs and measurements |
+| Sluice | `pipeline-reviewer.persona.md` | Datasets, transforms, and the claims from them |
+
+All six share the `workstream-cli` skill, which is the runnable reference for
+every `buzz` verb they use. Validate the pack before deploying it:
+
+```bash
+buzz pack validate ./crates/buzz-persona/packs/hive-workstream
+```
+
+### Running it with real agents
+
+Follow the ACP recipe above **twice** — one identity for the spec-writer, one
+for the critic — and add both as members of the channel. Managed agents in
+mentions mode subscribe to task heads (35001), review requests (47010), and
+handoffs (47030) in addition to chat, so an agent wakes when a task is assigned
+to it, a review names it as reviewer, or a handoff is addressed to it. No
+`--kinds` override is needed.
+
+```bash
+buzz channels add-member --channel "$CHANNEL" --pubkey "$SPEC_PUBKEY" --role member
+buzz channels add-member --channel "$CHANNEL" --pubkey "$CRITIC_PUBKEY" --role member
+```
+
+Then, as the human, open the work:
+
+```bash
+buzz workstream create --id chamber-v2 --type hardware \
+  --name "Thermal chamber v2" --channel "$CHANNEL" \
+  --member "$SPEC_PUBKEY" --member "$CRITIC_PUBKEY"
+
+buzz task create --id cal-sheet --workstream chamber-v2 \
+  --name "Write the calibration sheet" --channel "$CHANNEL" \
+  --assignee "$SPEC_PUBKEY"
+```
+
+The expected sequence, driven by the personas' own instructions:
+
+1. **Quill** publishes an artifact (35002) plus version 1 (47002), then a
+   review request (47010) with `--reviewer "$CRITIC_PUBKEY"`.
+2. **Vex** comments in thread (47011) and records `request-changes` (47012)
+   with a rationale.
+3. **Quill** publishes version 2, bumps the head, and opens a **new** request —
+   a decided request is never reused.
+4. **Vex** approves (47012).
+5. The human records the decision (35003) and completes the task
+   (`buzz task status --id cal-sheet --status done`).
+6. **Quill** hands the workstream back (47030).
+
+Watch it from the outside at any point:
+
+```bash
+buzz review list --target cal-sheet-doc --target-kind artifact | jq .
+buzz artifact show --id cal-sheet-doc | jq .        # head, then every version
+buzz task show --id cal-sheet | jq .                # head, then 47001 history
+```
+
+See `crates/buzz-cli/TESTING.md` §6.13 for the full command-by-command
+workstream runbook.
+
+### Automated coverage
+
+The same cycle runs without any LLM in
+`crates/buzz-test-client/tests/e2e_workstream_review.rs`, using three keypairs
+for the three participants. It asserts more than acceptance: after each write
+it re-queries from the **other** party's connection with a plain NIP-01 REQ
+(`kinds` + `#h` + `#a`) and fails if the counterparty cannot see the event. A
+relay that accepts a write but never serves it to the next actor passes every
+`OK true` check and still breaks the cycle.
+
+```bash
+# against a relay from step 3
+cargo test -p buzz-test-client --test e2e_workstream_review -- --ignored
+
+# or as part of the zero-dependency Solo gate
+./scripts/solo-e2e.sh
+```
+
+---
+
 ## Configuration reference
 
 The relay reads all configuration from environment variables. Defaults work
