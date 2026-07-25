@@ -322,12 +322,29 @@ def cmd_verify_store(args: argparse.Namespace) -> int:
     key = PrivateKey.from_hex(args.key) if args.key else PrivateKey()
 
     # POST /query is the HTTP form of a Nostr REQ filter. `kinds` is mandatory:
-    # an open-ended filter trips the relay's p-gate and returns 403.
+    # an open-ended filter trips the relay's p-gate and returns 403. The bridge
+    # authenticates via NIP-98: `Authorization: Nostr <base64(kind-27235)>`,
+    # whose `u` tag must be the CANONICAL community URL (http://<host>/query,
+    # from the Host header the tenant was resolved by), not the dialed port.
+    import base64 as _b64
+
+    # The bridge takes a JSON ARRAY of Nostr filters (like a REQ), not a bare
+    # filter object — a bare object parses as "invalid filters" → 400.
+    payload = [{"kinds": [KIND_NOTE], "ids": [r["id"] for r in records], "limit": 500}]
+    auth_event = build_event(
+        key,
+        27235,
+        "",
+        tags=[["u", f"http://{args.host}/query"], ["method", "POST"]],
+    )
+    auth_header = "Nostr " + _b64.b64encode(
+        json.dumps(auth_event, separators=(",", ":")).encode()
+    ).decode()
     status, body = http_post_json(
         args.node,
-        {"kinds": [KIND_NOTE], "ids": [r["id"] for r in records], "limit": 500},
+        payload,
         host_header=args.host,
-        extra_headers={"X-Pubkey": key.pubkey_hex},
+        extra_headers={"Authorization": auth_header},
     )
     found: set[str] = set()
     if isinstance(body, list):
