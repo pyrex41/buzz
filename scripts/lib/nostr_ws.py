@@ -234,7 +234,7 @@ def build_event(
 # ─── Minimal RFC 6455 client ────────────────────────────────────────────────
 
 _OP_CONT, _OP_TEXT, _OP_BIN, _OP_CLOSE, _OP_PING, _OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
-_GUID = "258EAFA5-E914-47DA-95CA-5AB0DC85B11C"
+_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class WebSocketError(RuntimeError):
