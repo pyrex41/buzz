@@ -53,20 +53,20 @@ impl StorageSweepConfig {
     /// `BUZZ_STORAGE_METRICS` kill switch (`off` ⇒ disabled, anything else
     /// including unset ⇒ enabled).
     pub fn from_env() -> Self {
-        let interval_secs = std::env::var("BUZZ_STORAGE_SWEEP_INTERVAL_SECS")
+        let interval_secs = crate::env_alias::var("BUZZ_STORAGE_SWEEP_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(3600)
             .max(60);
-        let timeout_secs = std::env::var("BUZZ_STORAGE_SWEEP_TIMEOUT_SECS")
+        let timeout_secs = crate::env_alias::var("BUZZ_STORAGE_SWEEP_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(120);
-        let max_objects = std::env::var("BUZZ_STORAGE_SWEEP_MAX_OBJECTS")
+        let max_objects = crate::env_alias::var("BUZZ_STORAGE_SWEEP_MAX_OBJECTS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1_000_000);
-        let enabled = std::env::var("BUZZ_STORAGE_METRICS")
+        let enabled = crate::env_alias::var("BUZZ_STORAGE_METRICS")
             .ok()
             .map(|v| v.trim().to_ascii_lowercase())
             .as_deref()

@@ -54,7 +54,7 @@ enum EmissionScope {
 
 impl EmissionScope {
     fn from_env() -> Self {
-        let raw = std::env::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
+        let raw = buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase();
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         let Some(value) = value else {
             anyhow::bail!("--profile requires a value (e.g. --profile solo)");
         };
-        if std::env::var("BUZZ_PROFILE").is_err() {
+        if buzz_relay::env_alias::var("BUZZ_PROFILE").is_err() {
             std::env::set_var("BUZZ_PROFILE", value);
         }
     }
@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     // all. An explicit BUZZ_AUTO_MIGRATE still wins, matching the profile's
     // defaults-only contract. Served (Postgres) deployments keep their
     // explicit opt-in.
-    let auto_migrate = match std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref() {
+    let auto_migrate = match buzz_relay::env_alias::var("BUZZ_AUTO_MIGRATE").ok().as_deref() {
         None if config.solo_profile => true,
         v => buzz_auto_migrate_enabled(v),
     };
@@ -548,15 +548,15 @@ async fn main() -> anyhow::Result<()> {
     //    dev box with none) still boots exactly as it did before — the probe
     //    there remains an explicit opt-in.
     if let Some(git) = state.git.as_ref() {
-        if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
+        if buzz_relay::env_alias::var("BUZZ_GIT_CONFORMANCE_PROBE")
             .map(|v| v != "false")
             .unwrap_or(!config.solo_profile)
         {
-            let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
+            let race_width = buzz_relay::env_alias::var("BUZZ_GIT_PROBE_WRITERS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32);
-            let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
+            let race_rounds = buzz_relay::env_alias::var("BUZZ_GIT_PROBE_ROUNDS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3);
@@ -599,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let reconcile_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(60)
@@ -631,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
     // Only runs when BUZZ_RECONCILE_CHANNELS=true (dev/CI environments).
     // Production relays create channels through the event pipeline and don't need this.
-    if std::env::var("BUZZ_RECONCILE_CHANNELS").is_ok() {
+    if buzz_relay::env_alias::var("BUZZ_RECONCILE_CHANNELS").is_ok() {
         let reconcile_state = Arc::clone(&state);
         tokio::spawn(async move {
             // Resolve the deployment's community from the configured relay URL
@@ -691,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
     // together with the workflow engine in a future multi-pod coordination pass.
     {
         let reaper_state = Arc::clone(&state);
-        let reaper_interval_secs: u64 = std::env::var("BUZZ_REAPER_INTERVAL_SECS")
+        let reaper_interval_secs: u64 = buzz_relay::env_alias::var("BUZZ_REAPER_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
@@ -966,7 +966,7 @@ async fn main() -> anyhow::Result<()> {
     // so missed archive commands still converge without a global DB scan.
     {
         let lifecycle_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30)
@@ -1029,7 +1029,7 @@ async fn main() -> anyhow::Result<()> {
     // Pool metrics: periodic background task polling DB + Redis pool stats.
     {
         let pool_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10)
@@ -1333,7 +1333,7 @@ fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
 
 /// Return the usage poll interval, with a floor that prevents a busy loop.
 fn usage_metrics_interval_secs() -> u64 {
-    std::env::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
+    buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(300)
@@ -1342,7 +1342,7 @@ fn usage_metrics_interval_secs() -> u64 {
 
 /// Return a gauge lifetime that always outlives several usage-poller ticks.
 fn usage_metrics_idle_timeout_secs(interval_secs: u64) -> u64 {
-    let configured = std::env::var("BUZZ_USAGE_METRICS_IDLE_TIMEOUT_SECS")
+    let configured = buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_IDLE_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse().ok());
     idle_timeout_secs(configured, interval_secs)

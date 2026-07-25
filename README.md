@@ -238,6 +238,11 @@ three deployment shapes — bare binary, Compose Solo, and a two-node ZeroMQ pai
 on Postgres — plus the environment variable reference, data layout, backups,
 and what Solo deliberately leaves out.
 
+Buzz is also known as **Hive**: every `BUZZ_*` environment variable accepts a
+`HIVE_*` spelling (`BUZZ_*` wins if both are set), and the same relay builds as
+a `hive` binary via `cargo build -p buzz-relay --features hive-bin --bin hive`.
+The full crate rename lands as its own single PR later.
+
 ---
 
 ## Going further

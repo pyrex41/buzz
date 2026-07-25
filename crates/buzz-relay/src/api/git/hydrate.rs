@@ -577,7 +577,7 @@ mod tests {
     //     api::git::hydrate::tests::live -- --nocapture --test-threads=1
 
     fn probe_enabled() -> bool {
-        std::env::var("BUZZ_GIT_S3_PROBE").as_deref() == Ok("1")
+        crate::env_alias::var("BUZZ_GIT_S3_PROBE").as_deref() == Ok("1")
     }
 
     fn store() -> GitStore {

@@ -381,7 +381,7 @@ fn capabilities() -> Vec<String> {
 /// `POD_IP` + actual bound port (k8s Downward API, zero RBAC) →
 /// every IP transport addr the endpoint reports (dev/local).
 fn advertise_addrs(endpoint: &MeshEndpoint) -> Vec<String> {
-    if let Ok(addr) = std::env::var("BUZZ_MESH_ADVERTISE_ADDR") {
+    if let Ok(addr) = crate::env_alias::var("BUZZ_MESH_ADVERTISE_ADDR") {
         let addr = addr.trim().to_string();
         if !addr.is_empty() {
             return vec![addr];
@@ -547,7 +547,7 @@ mod tests {
     fn mesh_defaults_off_when_env_absent() {
         // `Config::from_env` in the test env has no BUZZ_MESH set unless a
         // caller exported it; assert the fail-safe reading.
-        if std::env::var("BUZZ_MESH").is_ok() {
+        if crate::env_alias::var("BUZZ_MESH").is_ok() {
             return; // externally forced — skip rather than assert a lie
         }
         let config = crate::config::Config::from_env().expect("default config loads");

@@ -118,7 +118,7 @@ impl Capabilities {
 
         // Legacy alias resolves the default the canonical variable falls back
         // to, so setting only the old variable keeps working unchanged.
-        let huddle_audio_default = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
+        let huddle_audio_default = crate::env_alias::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
             .map(|v| !(v == "false" || v == "0"))
             .unwrap_or(true);
         let huddle_audio =
@@ -542,7 +542,7 @@ impl Config {
         // local-filesystem media — one binary, no Postgres/Redis/S3, data
         // under ./data. The relay binary also accepts `--profile solo`,
         // which main() maps onto this variable before config load.
-        let solo_profile = match std::env::var("BUZZ_PROFILE")
+        let solo_profile = match crate::env_alias::var("BUZZ_PROFILE")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -556,7 +556,7 @@ impl Config {
             }
         };
         let bind_addr_raw =
-            std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+            crate::env_alias::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
@@ -567,7 +567,7 @@ impl Config {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        let db_backend = match std::env::var("BUZZ_DB_BACKEND")
+        let db_backend = match crate::env_alias::var("BUZZ_DB_BACKEND")
             .unwrap_or_else(|_| {
                 if solo_profile {
                     "sqlite".to_string()
@@ -587,7 +587,7 @@ impl Config {
             }
         };
         let sqlite_path =
-            std::env::var("BUZZ_SQLITE_PATH").unwrap_or_else(|_| "./data/buzz.db".to_string());
+            crate::env_alias::var("BUZZ_SQLITE_PATH").unwrap_or_else(|_| "./data/buzz.db".to_string());
         if db_backend == DbBackendKind::Sqlite && read_database_url.is_some() {
             return Err(ConfigError::InvalidValue(
                 "READ_DATABASE_URL is Postgres-only: unset it with BUZZ_DB_BACKEND=sqlite"
@@ -601,7 +601,7 @@ impl Config {
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
 
-        let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
+        let pairing_relay_url = crate::env_alias::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -620,41 +620,41 @@ impl Config {
             })
             .transpose()?;
 
-        let max_connections = std::env::var("BUZZ_MAX_CONNECTIONS")
+        let max_connections = crate::env_alias::var("BUZZ_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10_000);
 
-        let max_concurrent_handlers = std::env::var("BUZZ_MAX_CONCURRENT_HANDLERS")
+        let max_concurrent_handlers = crate::env_alias::var("BUZZ_MAX_CONCURRENT_HANDLERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1024);
 
-        let send_buffer_size = std::env::var("BUZZ_SEND_BUFFER")
+        let send_buffer_size = crate::env_alias::var("BUZZ_SEND_BUFFER")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000);
 
-        let max_frame_bytes = std::env::var("BUZZ_MAX_FRAME_BYTES")
+        let max_frame_bytes = crate::env_alias::var("BUZZ_MAX_FRAME_BYTES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
 
-        let slow_client_grace_limit = std::env::var("BUZZ_SLOW_CLIENT_GRACE_LIMIT")
+        let slow_client_grace_limit = crate::env_alias::var("BUZZ_SLOW_CLIENT_GRACE_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
 
-        let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
+        let require_auth_token = crate::env_alias::var("BUZZ_REQUIRE_AUTH_TOKEN")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let pubkey_allowlist_enabled = std::env::var("BUZZ_PUBKEY_ALLOWLIST")
+        let pubkey_allowlist_enabled = crate::env_alias::var("BUZZ_PUBKEY_ALLOWLIST")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
+        let require_relay_membership = crate::env_alias::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -668,10 +668,10 @@ impl Config {
         // new Redis key. Horizontally-scaled deployments explicitly set
         // `BUZZ_MESH=on`; anything else (absent, `off`, other values) keeps
         // exact single-instance behavior.
-        let mesh_enabled = std::env::var("BUZZ_MESH")
+        let mesh_enabled = crate::env_alias::var("BUZZ_MESH")
             .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
             .unwrap_or(false);
-        let mesh_bind_addr = std::env::var("BUZZ_MESH_BIND_ADDR")
+        let mesh_bind_addr = crate::env_alias::var("BUZZ_MESH_BIND_ADDR")
             .map(|raw| {
                 raw.parse::<SocketAddr>().map_err(|e| {
                     ConfigError::InvalidValue(format!("invalid BUZZ_MESH_BIND_ADDR: {e}"))
@@ -688,7 +688,7 @@ impl Config {
         // mesh's session fencing + cross-pod correctness fences require shared
         // (Redis) state — reject the combination instead of silently weakening
         // replay/rate-limit guarantees.
-        let messaging_backend = match std::env::var("BUZZ_MESSAGING_BACKEND")
+        let messaging_backend = match crate::env_alias::var("BUZZ_MESSAGING_BACKEND")
             .unwrap_or_else(|_| {
                 if solo_profile {
                     "inproc".to_string()
@@ -724,8 +724,8 @@ impl Config {
         }
 
         let zmq_bind =
-            std::env::var("BUZZ_ZMQ_BIND").unwrap_or_else(|_| "tcp://0.0.0.0:5559".to_string());
-        let zmq_peers: Vec<String> = std::env::var("BUZZ_ZMQ_PEERS")
+            crate::env_alias::var("BUZZ_ZMQ_BIND").unwrap_or_else(|_| "tcp://0.0.0.0:5559".to_string());
+        let zmq_peers: Vec<String> = crate::env_alias::var("BUZZ_ZMQ_PEERS")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
@@ -736,7 +736,7 @@ impl Config {
         // Shared-state backend. Defaults follow the messaging backend; a
         // multi-node ZMQ mesh must state its choice explicitly because the
         // replay guard and rate limiter are cross-pod correctness fences.
-        let state_backend = match std::env::var("BUZZ_STATE_BACKEND") {
+        let state_backend = match crate::env_alias::var("BUZZ_STATE_BACKEND") {
             Ok(raw) => match raw.to_ascii_lowercase().as_str() {
                 "redis" => StateBackend::Redis,
                 "inproc" | "in-process" | "inprocess" => StateBackend::InProcess,
@@ -771,11 +771,11 @@ impl Config {
 
         // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
         // `on`/`true`/`1` only, anything else (absent, `off`, typos) is off.
-        let mesh_demo_echo = std::env::var("BUZZ_MESH_DEMO_ECHO")
+        let mesh_demo_echo = crate::env_alias::var("BUZZ_MESH_DEMO_ECHO")
             .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
             .unwrap_or(false);
 
-        let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
+        let allow_nip_oa_auth = crate::env_alias::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -850,31 +850,31 @@ impl Config {
             );
         }
 
-        let cors_origins = std::env::var("BUZZ_CORS_ORIGINS")
+        let cors_origins = crate::env_alias::var("BUZZ_CORS_ORIGINS")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
 
-        let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
+        let relay_private_key = crate::env_alias::var("BUZZ_RELAY_PRIVATE_KEY").ok();
 
-        let uds_path = std::env::var("BUZZ_UDS_PATH")
+        let uds_path = crate::env_alias::var("BUZZ_UDS_PATH")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let health_port = std::env::var("BUZZ_HEALTH_PORT")
+        let health_port = crate::env_alias::var("BUZZ_HEALTH_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
-        let metrics_port = std::env::var("BUZZ_METRICS_PORT")
+        let metrics_port = crate::env_alias::var("BUZZ_METRICS_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
-        let media_backend = match std::env::var("BUZZ_MEDIA_BACKEND")
+        let media_backend = match crate::env_alias::var("BUZZ_MEDIA_BACKEND")
             .unwrap_or_else(|_| {
                 if solo_profile {
                     "local".to_string()
@@ -895,71 +895,71 @@ impl Config {
         };
         let media = buzz_media::MediaConfig {
             backend: media_backend,
-            local_path: std::env::var("BUZZ_MEDIA_PATH")
+            local_path: crate::env_alias::var("BUZZ_MEDIA_PATH")
                 .unwrap_or_else(|_| "./data/media".to_string()),
-            s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
+            s3_endpoint: crate::env_alias::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
+            s3_access_key: crate::env_alias::var("BUZZ_S3_ACCESS_KEY")
                 .unwrap_or_else(|_| "buzz_dev".to_string()),
-            s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
+            s3_secret_key: crate::env_alias::var("BUZZ_S3_SECRET_KEY")
                 .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
-            s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
-            s3_region: std::env::var("BUZZ_S3_REGION")
+            s3_bucket: crate::env_alias::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
+            s3_region: crate::env_alias::var("BUZZ_S3_REGION")
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .unwrap_or_else(|_| "us-east-1".to_string()),
-            max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
+            max_image_bytes: crate::env_alias::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(50 * 1024 * 1024),
-            max_gif_bytes: std::env::var("BUZZ_MAX_GIF_BYTES")
+            max_gif_bytes: crate::env_alias::var("BUZZ_MAX_GIF_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10 * 1024 * 1024),
-            max_video_bytes: std::env::var("BUZZ_MAX_VIDEO_BYTES")
+            max_video_bytes: crate::env_alias::var("BUZZ_MAX_VIDEO_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500 * 1024 * 1024),
-            max_file_bytes: std::env::var("BUZZ_MAX_FILE_BYTES")
+            max_file_bytes: crate::env_alias::var("BUZZ_MAX_FILE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100 * 1024 * 1024),
-            public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
+            public_base_url: crate::env_alias::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
             // Per-upload-event records (`_uploads/` moderation side channel).
             // Off by default; coherence between the three knobs is enforced in
             // MediaConfig::validate at startup.
-            upload_records_enabled: std::env::var("BUZZ_MEDIA_UPLOAD_RECORDS")
+            upload_records_enabled: crate::env_alias::var("BUZZ_MEDIA_UPLOAD_RECORDS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            upload_ip_header: std::env::var("BUZZ_MEDIA_UPLOAD_IP_HEADER")
+            upload_ip_header: crate::env_alias::var("BUZZ_MEDIA_UPLOAD_IP_HEADER")
                 .ok()
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
-            upload_port_header: std::env::var("BUZZ_MEDIA_UPLOAD_PORT_HEADER")
+            upload_port_header: crate::env_alias::var("BUZZ_MEDIA_UPLOAD_PORT_HEADER")
                 .ok()
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
         };
         let media_max_concurrent_uploads: usize =
-            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
+            crate::env_alias::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
                 .unwrap_or(8);
         let media_max_concurrent_uploads_per_pubkey: u32 =
-            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
+            crate::env_alias::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
                 .unwrap_or(2)
                 .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
-        let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
+        let media_uploads_per_minute: u32 = crate::env_alias::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
-        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
+        let require_media_get_auth = crate::env_alias::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
             .map(|v| {
                 v == "true"
                     || v == "1"
@@ -968,7 +968,7 @@ impl Config {
             })
             .unwrap_or(false);
 
-        let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
+        let ephemeral_ttl_override = crate::env_alias::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
             .filter(|&v| v > 0);
@@ -982,61 +982,61 @@ impl Config {
 
         // Git server config
         let git_repo_path = ensure_git_repo_path(
-            std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
+            crate::env_alias::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
         let git_pack_cache_path = ensure_git_path(
             "BUZZ_GIT_PACK_CACHE_PATH",
-            std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
+            crate::env_alias::var("BUZZ_GIT_PACK_CACHE_PATH")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
         )?;
-        let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
+        let git_max_pack_bytes: u64 = crate::env_alias::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500 * 1024 * 1024); // 500 MB
-        let git_max_repo_bytes: u64 = std::env::var("BUZZ_GIT_MAX_REPO_BYTES")
+        let git_max_repo_bytes: u64 = crate::env_alias::var("BUZZ_GIT_MAX_REPO_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
-        let git_pack_cache_max_bytes: u64 = std::env::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
+        let git_pack_cache_max_bytes: u64 = crate::env_alias::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| git_max_repo_bytes.saturating_mul(5)); // 5 GB at defaults
         let git_pack_cache_max_concurrent_populations: usize =
-            std::env::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
+            crate::env_alias::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|value| *value > 0)
                 .unwrap_or(2);
-        let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
+        let git_max_repos_per_pubkey: u32 = crate::env_alias::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
-        let git_max_concurrent_ops: usize = std::env::var("BUZZ_GIT_MAX_CONCURRENT_OPS")
+        let git_max_concurrent_ops: usize = crate::env_alias::var("BUZZ_GIT_MAX_CONCURRENT_OPS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
-        let git_hook_hmac_secret: String = std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET")
+        let git_hook_hmac_secret: String = crate::env_alias::var("BUZZ_GIT_HOOK_HMAC_SECRET")
             .unwrap_or_else(|_| {
                 // Generate a random secret if not configured (dev mode).
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
             });
         let push_executor_key_id =
-            std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
+            crate::env_alias::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
             return Err(ConfigError::InvalidValue(
                 "BUZZ_PUSH_EXECUTOR_KEY_ID must contain 1..=64 bytes".to_string(),
             ));
         }
-        let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+        let push_gateway_delivery_url = match crate::env_alias::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
             Err(_) => Some(parse_push_gateway_delivery_url(
                 DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
             )?),
         };
-        let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
+        let push_gateway_timeout_millis = match crate::env_alias::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
                 .parse::<u64>()
                 .ok()
@@ -1091,7 +1091,7 @@ impl Config {
         };
 
         // Read-only deployment-admin surface. The route is absent when the host is unset.
-        let admin = match std::env::var("BUZZ_ADMIN_HOST")
+        let admin = match crate::env_alias::var("BUZZ_ADMIN_HOST")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -1103,7 +1103,7 @@ impl Config {
                         "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
                     ));
                 }
-                let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
+                let web_dir = crate::env_alias::var("BUZZ_ADMIN_WEB_DIR")
                     .ok()
                     .map(|value| std::path::PathBuf::from(value.trim()))
                     .filter(|value| !value.as_os_str().is_empty());
@@ -1120,12 +1120,12 @@ impl Config {
         };
 
         // Web UI static file serving
-        let web_dir = std::env::var("BUZZ_WEB_DIR")
+        let web_dir = crate::env_alias::var("BUZZ_WEB_DIR")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        let serve_git_web_gui = std::env::var("BUZZ_SERVE_GIT_WEB_GUI")
+        let serve_git_web_gui = crate::env_alias::var("BUZZ_SERVE_GIT_WEB_GUI")
             .map(|value| value == "true" || value == "1")
             .unwrap_or(false);
 
@@ -1142,7 +1142,7 @@ impl Config {
         // Reject explicitly-configured secrets that are too short.
         // The auto-generated fallback is always 64 hex chars (32 bytes), so this
         // only fires when someone sets BUZZ_GIT_HOOK_HMAC_SECRET to a weak value.
-        if std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET").is_ok() && git_hook_hmac_secret.len() < 32 {
+        if crate::env_alias::var("BUZZ_GIT_HOOK_HMAC_SECRET").is_ok() && git_hook_hmac_secret.len() < 32 {
             return Err(ConfigError::InvalidValue(
                 "BUZZ_GIT_HOOK_HMAC_SECRET must be at least 32 characters (16 bytes hex)"
                     .to_string(),
