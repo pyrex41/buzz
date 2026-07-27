@@ -1,0 +1,14 @@
+[package]
+name = "buzz-storage-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-neutral storage DTOs and lifecycle traits for Buzz relays"
+
+[dependencies]
+buzz-core = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

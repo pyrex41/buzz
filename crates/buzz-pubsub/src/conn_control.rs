@@ -14,70 +14,13 @@
 //! The DB ban row remains the durable backstop: even if a disconnect message is
 //! dropped, the next auth attempt is refused at the auth seam.
 
-use buzz_core::{CommunityId, TenantContext};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
-use crate::topic::BUZZ_PREFIX;
-
-/// Tenant-local Redis pub/sub channel suffix for connection-control messages.
-pub const CONN_CONTROL_SUFFIX: &str = "conn-control";
-
-/// Pattern the subscriber uses to receive connection-control messages for every
-/// community this pod may hold connections for.
-pub const CONN_CONTROL_PATTERN: &str = "buzz:*:conn-control";
-
-/// Redis pub/sub channel for connection-control messages under `ctx`.
-pub fn conn_control_channel(ctx: &TenantContext) -> String {
-    format!("{BUZZ_PREFIX}:{}:{CONN_CONTROL_SUFFIX}", ctx.community())
-}
-
-/// Parse a connection-control Redis channel into its scoped community id.
-pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
-    let mut parts = channel.split(':');
-    if parts.next()? != BUZZ_PREFIX {
-        return None;
-    }
-    let community_id = Uuid::parse_str(parts.next()?).ok()?;
-    if parts.next()? != CONN_CONTROL_SUFFIX {
-        return None;
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(CommunityId::from_uuid(community_id))
-}
-
-/// A connection-control command to apply on every pod.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "op")]
-pub enum ConnControl {
-    /// Disconnect every live socket bound to the carrying community.
-    DisconnectCommunity,
-    /// Disconnect every live connection authenticated as `pubkey` in the
-    /// carrying community — live ban enforcement. `pubkey` is 32 raw bytes.
-    /// `event_id` and `reason` reproduce the same NIP-01 `OK` frame the origin
-    /// pod sent, so a member disconnected on any pod learns why.
-    DisconnectPubkey {
-        /// Banned member's pubkey bytes.
-        pubkey: Vec<u8>,
-        /// Id echoed in the closing `OK` frame (the ban event's id on origin).
-        event_id: String,
-        /// Human-readable close reason for the `OK` frame.
-        reason: String,
-    },
-}
-
-/// A connection-control command received from a community-scoped Redis channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopedConnControl {
-    /// Community whose connections the command applies to.
-    pub community_id: CommunityId,
-    /// The tenant-local connection-control command.
-    pub command: ConnControl,
-}
+pub use buzz_messaging_api::control::{
+    conn_control_channel, parse_conn_control_channel, ConnControl, ScopedConnControl,
+    CONN_CONTROL_PATTERN, CONN_CONTROL_SUFFIX,
+};
 
 /// Initial reconnect backoff (1 second).
 const BACKOFF_INITIAL_SECS: u64 = 1;
@@ -164,6 +107,8 @@ async fn connect_and_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::{CommunityId, TenantContext};
+    use uuid::Uuid;
 
     fn ctx(id: u128, host: &str) -> TenantContext {
         TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), host)

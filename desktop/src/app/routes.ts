@@ -8,6 +8,8 @@ export const routes = rootRoute("root.tsx", [
   route("/settings", "settings.tsx"),
   route("/workflows", "workflows.tsx"),
   route("/workflows/$workflowId", "workflows.$workflowId.tsx"),
+  route("/workstreams", "workstreams.tsx"),
+  route("/workstreams/$workstreamId", "workstreams.$workstreamId.tsx"),
   route("/projects", "projects.tsx"),
   route("/projects/$projectId", "projects.$projectId.tsx"),
   route("/messages/new", "messages.new.tsx"),

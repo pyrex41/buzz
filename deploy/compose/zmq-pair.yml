@@ -1,0 +1,219 @@
+# =============================================================================
+# zmq-pair.yml — homelab ZMQ pair: two relays, static mesh, shared Postgres
+# =============================================================================
+# The small-cluster example from the Hive plan (§4.2, §8 Phase 5): two relay
+# nodes fanning out to each other over a ZeroMQ static full mesh instead of
+# Redis pub/sub, sharing one Postgres event store.
+#
+#   cd deploy/compose
+#   cp .env.example .env && $EDITOR .env      # set POSTGRES_PASSWORD, REDIS_PASSWORD
+#   docker compose -f zmq-pair.yml up -d
+#
+# EXPERIMENTAL. Multi-node ZMQ is the newest transport in the tree; the soak
+# harness that exercises it is scripts/zmq-soak.sh. Run that against a build
+# before trusting this topology with anything you would miss.
+#
+# ── Why Redis is still here ──────────────────────────────────────────────────
+# ZMQ replaces Redis for *pub/sub fan-out only*. The relay's shared state — the
+# NIP-98 replay guard and the rate limiter — are cross-node correctness fences,
+# and the config layer REJECTS the combination that would silently break them:
+#
+#   BUZZ_STATE_BACKEND=inproc + BUZZ_ZMQ_PEERS set  ->  startup error
+#   BUZZ_ZMQ_PEERS set + BUZZ_STATE_BACKEND unset   ->  startup error
+#                                                       (must choose explicitly)
+#
+# So a multi-node ZMQ deployment is zmq-messaging + redis-state. Dropping Redis
+# entirely is a single-node (Solo) story, not a cluster one. See
+# crates/buzz-relay/src/config.rs for the validation.
+#
+# ── Topology ─────────────────────────────────────────────────────────────────
+# Each node binds one PUB socket on :5559 and SUBs to every *other* node's PUB
+# endpoint. BUZZ_ZMQ_BIND is this node's own bind address; BUZZ_ZMQ_PEERS lists
+# the others (comma-separated). A node short-circuits its own publishes
+# in-process, so it must NOT list itself as a peer.
+#
+#   relay-a  PUB tcp://0.0.0.0:5559   peers: tcp://relay-b:5559
+#   relay-b  PUB tcp://0.0.0.0:5559   peers: tcp://relay-a:5559
+#
+# Adding a third node means updating BUZZ_ZMQ_PEERS on all three: v1 is a
+# static mesh with no peer discovery. That is the documented ceiling — clusters
+# that outgrow hand-maintained peer lists should stay on the Redis transport.
+#
+# ── Delivery contract ────────────────────────────────────────────────────────
+# ZMQ fan-out is at-most-once and ephemeral, exactly like the Redis pub/sub it
+# replaces. If a node is down, live fan-out to it is simply lost — the events
+# are still durably committed to Postgres, and a reconnecting client backfills
+# them by querying history. Do not read "at-most-once" as "lossy storage".
+#
+# ── Fronting the pair ────────────────────────────────────────────────────────
+# Both relays must present the SAME public origin, because the community
+# boundary is host-derived: RELAY_URL is identical on both nodes here. Put a
+# load balancer in front of 3000/3001 terminating that hostname. WebSocket
+# clients hold long-lived connections and do not need sticky sessions — fan-out
+# is what the mesh is for.
+
+name: hive-zmq-pair
+
+services:
+  relay-a:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    hostname: relay-a
+    environment:
+      BUZZ_DB_BACKEND: postgres
+      DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-buzz}
+
+      # Messaging: ZMQ static mesh. State: Redis (mandatory, see header).
+      BUZZ_MESSAGING_BACKEND: zmq
+      BUZZ_STATE_BACKEND: redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      BUZZ_ZMQ_BIND: tcp://0.0.0.0:5559
+      BUZZ_ZMQ_PEERS: tcp://relay-b:5559
+
+      BUZZ_MEDIA_BACKEND: local
+      BUZZ_MEDIA_PATH: /data/media
+
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+
+      # Identical on both nodes on purpose: one community, two processes.
+      RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      BUZZ_MEDIA_BASE_URL: ${BUZZ_MEDIA_BASE_URL:-http://localhost:3000/media}
+
+      # Only node A migrates; node B waits for it (see relay-b's depends_on).
+      BUZZ_AUTO_MIGRATE: "true"
+
+      RUST_LOG: ${RUST_LOG:-buzz_relay=info,buzz_db=info,buzz_pubsub=info}
+    ports:
+      - "${RELAY_A_HTTP_PORT:-3000}:3000"
+      - "${RELAY_A_HEALTH_PORT:-8080}:8080"
+      - "${RELAY_A_METRICS_PORT:-9102}:9102"
+    volumes:
+      # Shared media volume: either node can serve a blob either node stored.
+      - hive-media-data:/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  relay-b:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    hostname: relay-b
+    environment:
+      BUZZ_DB_BACKEND: postgres
+      DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-buzz}
+
+      BUZZ_MESSAGING_BACKEND: zmq
+      BUZZ_STATE_BACKEND: redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      BUZZ_ZMQ_BIND: tcp://0.0.0.0:5559
+      BUZZ_ZMQ_PEERS: tcp://relay-a:5559
+
+      BUZZ_MEDIA_BACKEND: local
+      BUZZ_MEDIA_PATH: /data/media
+
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+
+      RELAY_URL: ${RELAY_URL:-ws://localhost:3000}
+      BUZZ_MEDIA_BASE_URL: ${BUZZ_MEDIA_BASE_URL:-http://localhost:3000/media}
+
+      # Off: two relays racing the same migration against one database is how
+      # you get a half-applied schema. Node A owns migrations.
+      BUZZ_AUTO_MIGRATE: "false"
+
+      RUST_LOG: ${RUST_LOG:-buzz_relay=info,buzz_db=info,buzz_pubsub=info}
+    ports:
+      - "${RELAY_B_HTTP_PORT:-3001}:3000"
+      - "${RELAY_B_HEALTH_PORT:-8081}:8080"
+      - "${RELAY_B_METRICS_PORT:-9103}:9102"
+    volumes:
+      - hive-media-data:/data/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Wait for A to finish migrating before B touches the schema.
+      relay-a:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buzz}
+      POSTGRES_USER: ${POSTGRES_USER:-buzz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - hive-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  redis:
+    # Shared state only (replay guard + rate limiter). Pub/sub rides ZMQ.
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - hive-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+volumes:
+  hive-postgres-data:
+    labels:
+      com.buzz.volume: postgres
+  hive-redis-data:
+    labels:
+      com.buzz.volume: redis
+  hive-media-data:
+    labels:
+      com.buzz.volume: media
+
+networks:
+  hive-net:
+    driver: bridge
+    labels:
+      com.buzz.network: zmq-pair

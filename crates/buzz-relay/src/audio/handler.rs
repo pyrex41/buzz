@@ -291,7 +291,7 @@ async fn handle_active_audio_connection(
     // Redis arbitrates ownership and this pod either owns the room locally or
     // forwards the client to the owner over a `HuddleControl` stream. When the
     // mesh is off, we keep today's behavior exactly — including the
-    // `huddle_audio_available=false` rejection under a non-mesh horizontal
+    // `capabilities.huddle_audio = false` rejection under a non-mesh horizontal
     // deployment (two peers on different pods would never hear each other).
     //
     // `remote_owner` is `Some` only on the non-owner path; it carries the
@@ -354,7 +354,7 @@ async fn handle_active_audio_connection(
             }
         }
         None => {
-            if !state.config.huddle_audio_available {
+            if !state.config.capabilities.huddle_audio {
                 debug!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,

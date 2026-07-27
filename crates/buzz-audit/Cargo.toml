@@ -9,7 +9,9 @@ description = "Hash-chain audit log for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
-sqlx        = { workspace = true }
+# `sqlite` backs the Solo-profile audit arm (`AuditService::new_sqlite`);
+# named explicitly even though the workspace feature set already enables it.
+sqlx        = { workspace = true, features = ["sqlite"] }
 tokio       = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -20,3 +22,9 @@ thiserror   = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
 futures-util = { workspace = true }
+
+[dev-dependencies]
+# Provides the real sqlite migrations (audit_log ships in buzz-db's embedded
+# migration 0002) for the infrastructure-free sqlite chain tests. Dev-only —
+# no cycle: buzz-db does not depend on buzz-audit.
+buzz-db = { workspace = true }

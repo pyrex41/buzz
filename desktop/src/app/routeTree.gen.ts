@@ -5,6 +5,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from "./routes/root";
+import { Route as workstreamsRouteImport } from "./routes/workstreams";
 import { Route as workflowsRouteImport } from "./routes/workflows";
 import { Route as settingsRouteImport } from "./routes/settings";
 import { Route as remindersRouteImport } from "./routes/reminders";
@@ -12,12 +13,18 @@ import { Route as pulseRouteImport } from "./routes/pulse";
 import { Route as projectsRouteImport } from "./routes/projects";
 import { Route as agentsRouteImport } from "./routes/agents";
 import { Route as indexRouteImport } from "./routes/index";
+import { Route as workstreamsDotworkstreamIdRouteImport } from "./routes/workstreams.$workstreamId";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
 import { Route as projectsDotprojectIdRouteImport } from "./routes/projects.$projectId";
 import { Route as messagesDotnewRouteImport } from "./routes/messages.new";
 import { Route as channelsDotchannelIdRouteImport } from "./routes/channels.$channelId";
 import { Route as channelsDotchannelIdDotpostsDotpostIdRouteImport } from "./routes/channels.$channelId.posts.$postId";
 
+const workstreamsRoute = workstreamsRouteImport.update({
+  id: "/workstreams",
+  path: "/workstreams",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const workflowsRoute = workflowsRouteImport.update({
   id: "/workflows",
   path: "/workflows",
@@ -53,6 +60,12 @@ const indexRoute = indexRouteImport.update({
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
+const workstreamsDotworkstreamIdRoute =
+  workstreamsDotworkstreamIdRouteImport.update({
+    id: "/workstreams/$workstreamId",
+    path: "/workstreams/$workstreamId",
+    getParentRoute: () => rootRouteImport,
+  } as any);
 const workflowsDotworkflowIdRoute = workflowsDotworkflowIdRouteImport.update({
   id: "/workflows/$workflowId",
   path: "/workflows/$workflowId",
@@ -88,10 +101,12 @@ export interface FileRoutesByFullPath {
   "/reminders": typeof remindersRoute;
   "/settings": typeof settingsRoute;
   "/workflows": typeof workflowsRoute;
+  "/workstreams": typeof workstreamsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
+  "/workstreams/$workstreamId": typeof workstreamsDotworkstreamIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
 export interface FileRoutesByTo {
@@ -102,10 +117,12 @@ export interface FileRoutesByTo {
   "/reminders": typeof remindersRoute;
   "/settings": typeof settingsRoute;
   "/workflows": typeof workflowsRoute;
+  "/workstreams": typeof workstreamsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
+  "/workstreams/$workstreamId": typeof workstreamsDotworkstreamIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
 export interface FileRoutesById {
@@ -117,10 +134,12 @@ export interface FileRoutesById {
   "/reminders": typeof remindersRoute;
   "/settings": typeof settingsRoute;
   "/workflows": typeof workflowsRoute;
+  "/workstreams": typeof workstreamsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
+  "/workstreams/$workstreamId": typeof workstreamsDotworkstreamIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
 export interface FileRouteTypes {
@@ -133,10 +152,12 @@ export interface FileRouteTypes {
     | "/reminders"
     | "/settings"
     | "/workflows"
+    | "/workstreams"
     | "/channels/$channelId"
     | "/messages/new"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
+    | "/workstreams/$workstreamId"
     | "/channels/$channelId/posts/$postId";
   fileRoutesByTo: FileRoutesByTo;
   to:
@@ -147,10 +168,12 @@ export interface FileRouteTypes {
     | "/reminders"
     | "/settings"
     | "/workflows"
+    | "/workstreams"
     | "/channels/$channelId"
     | "/messages/new"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
+    | "/workstreams/$workstreamId"
     | "/channels/$channelId/posts/$postId";
   id:
     | "__root__"
@@ -161,10 +184,12 @@ export interface FileRouteTypes {
     | "/reminders"
     | "/settings"
     | "/workflows"
+    | "/workstreams"
     | "/channels/$channelId"
     | "/messages/new"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
+    | "/workstreams/$workstreamId"
     | "/channels/$channelId/posts/$postId";
   fileRoutesById: FileRoutesById;
 }
@@ -176,15 +201,24 @@ export interface RootRouteChildren {
   remindersRoute: typeof remindersRoute;
   settingsRoute: typeof settingsRoute;
   workflowsRoute: typeof workflowsRoute;
+  workstreamsRoute: typeof workstreamsRoute;
   channelsDotchannelIdRoute: typeof channelsDotchannelIdRoute;
   messagesDotnewRoute: typeof messagesDotnewRoute;
   projectsDotprojectIdRoute: typeof projectsDotprojectIdRoute;
   workflowsDotworkflowIdRoute: typeof workflowsDotworkflowIdRoute;
+  workstreamsDotworkstreamIdRoute: typeof workstreamsDotworkstreamIdRoute;
   channelsDotchannelIdDotpostsDotpostIdRoute: typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
 
 declare module "@tanstack/react-router" {
   interface FileRoutesByPath {
+    "/workstreams": {
+      id: "/workstreams";
+      path: "/workstreams";
+      fullPath: "/workstreams";
+      preLoaderRoute: typeof workstreamsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/workflows": {
       id: "/workflows";
       path: "/workflows";
@@ -234,6 +268,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof indexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/workstreams/$workstreamId": {
+      id: "/workstreams/$workstreamId";
+      path: "/workstreams/$workstreamId";
+      fullPath: "/workstreams/$workstreamId";
+      preLoaderRoute: typeof workstreamsDotworkstreamIdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/workflows/$workflowId": {
       id: "/workflows/$workflowId";
       path: "/workflows/$workflowId";
@@ -280,10 +321,12 @@ const rootRouteChildren: RootRouteChildren = {
   remindersRoute: remindersRoute,
   settingsRoute: settingsRoute,
   workflowsRoute: workflowsRoute,
+  workstreamsRoute: workstreamsRoute,
   channelsDotchannelIdRoute: channelsDotchannelIdRoute,
   messagesDotnewRoute: messagesDotnewRoute,
   projectsDotprojectIdRoute: projectsDotprojectIdRoute,
   workflowsDotworkflowIdRoute: workflowsDotworkflowIdRoute,
+  workstreamsDotworkstreamIdRoute: workstreamsDotworkstreamIdRoute,
   channelsDotchannelIdDotpostsDotpostIdRoute:
     channelsDotchannelIdDotpostsDotpostIdRoute,
 };

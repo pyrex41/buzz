@@ -126,16 +126,16 @@ pub struct SearchResult {
     pub page: u32,
 }
 
-const PER_PAGE_MAX: u32 = 500;
-const PER_PAGE_DEFAULT: u32 = 100;
-/// Hard cap on search text handed to Postgres text-search parsers. This keeps a
+pub(crate) const PER_PAGE_MAX: u32 = 500;
+pub(crate) const PER_PAGE_DEFAULT: u32 = 100;
+/// Hard cap on search text handed to the text-search parsers. This keeps a
 /// single request from spending unbounded parser CPU/memory while still allowing
 /// far longer queries than the desktop UI normally emits.
-const SEARCH_TEXT_MAX_CHARS: usize = 4096;
+pub(crate) const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// Search pages are currently server-generated (WS uses 1..=MAX_SEARCH_PAGES,
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
-const PAGE_MAX: u32 = 1000;
+pub(crate) const PAGE_MAX: u32 = 1000;
 
 fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
     match mode {
@@ -176,7 +176,10 @@ fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_
         }
     }
 }
-fn normalized_search_text(q: &str) -> Option<String> {
+/// Trim, NUL-strip, and length-cap raw NIP-50 search text. `None` means the
+/// query is empty after normalization and the caller must short-circuit to
+/// zero hits without touching SQL. Shared by both backend query paths.
+pub(crate) fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
         return None;

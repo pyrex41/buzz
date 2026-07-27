@@ -27,12 +27,12 @@ use crate::{
 };
 
 /// Parse a tag slice, mapping errors to `SdkError::InvalidTag`.
-fn tag(parts: &[&str]) -> Result<Tag, SdkError> {
+pub(crate) fn tag(parts: &[&str]) -> Result<Tag, SdkError> {
     Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))
 }
 
 /// Validate content byte length.
-fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
+pub(crate) fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
     let got = content.len();
     if got > max {
         return Err(SdkError::ContentTooLarge { max, got });
@@ -66,7 +66,7 @@ fn check_commit_hex(s: &str, field: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
-fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
+pub(crate) fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SdkError::InvalidInput(format!(
             "{field} must be a 64-character hex pubkey"
@@ -76,7 +76,7 @@ fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
 }
 
 /// Validate an exact-length hex string (event ids), returning it lowercased.
-fn check_hex_exact(s: &str, len: usize, field: &str) -> Result<String, SdkError> {
+pub(crate) fn check_hex_exact(s: &str, len: usize, field: &str) -> Result<String, SdkError> {
     if s.len() != len || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SdkError::InvalidInput(format!(
             "{field} must be a {len}-character hex string"

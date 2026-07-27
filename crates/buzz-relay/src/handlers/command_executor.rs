@@ -20,7 +20,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
-use buzz_db::DbError;
+use buzz_db::{CommandEventPersist, DbError};
 use buzz_workflow::executor::TriggerContext;
 
 use crate::state::AppState;
@@ -75,160 +75,32 @@ pub async fn handle_command(
     }
 }
 
-/// Result of persisting a command event: either a duplicate (already processed)
-/// or an open transaction that the handler must commit after executing mutations.
-enum PersistResult {
-    /// Event was already processed — return idempotent success.
-    Duplicate,
-    /// Event inserted — transaction is open, handler must commit after mutations.
-    Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
-}
-
-/// Persist a command event inside a transaction. Returns the OPEN transaction
-/// as an idempotency guard — if the event was already stored, `Duplicate` is
-/// returned and the handler skips execution.
+/// Persist a command event via `buzz-db`'s transactional idempotency guard,
+/// mapping storage errors onto ingest results.
 ///
-/// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
-/// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
-///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// Returns [`CommandEventPersist::Duplicate`] when the event was already
+/// stored (or dominated by a newer NIP-33 write) — the handler returns
+/// idempotent success and skips execution. On `Inserted`, the handler must
+/// commit the returned guard after its domain mutation succeeds.
 async fn persist_command_event(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     event: &Event,
     channel_id_override: Option<Uuid>,
-) -> Result<PersistResult, IngestError> {
+) -> Result<CommandEventPersist, IngestError> {
     let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
 
-    let mut tx = state
+    state
         .db
-        .begin_transaction()
+        .persist_command_event(tenant.community(), event, channel_id)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
-
-    // INSERT with ON CONFLICT DO NOTHING — idempotency guard.
-    let id_bytes = event.id.as_bytes();
-    let pubkey_bytes = event.pubkey.to_bytes();
-    let sig_bytes = event.sig.serialize();
-    let tags_json = serde_json::to_value(&event.tags)
-        .map_err(|e| IngestError::Internal(format!("error: serialize tags: {e}")))?;
-    let kind_i32 = event.kind.as_u16() as i32;
-    let created_at_secs = event.created_at.as_secs() as i64;
-    let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0).ok_or_else(|| {
-        IngestError::Rejected(format!("invalid: bad timestamp {created_at_secs}"))
-    })?;
-    let received_at = chrono::Utc::now();
-
-    // Extract d_tag for parameterized replaceable kinds (NIP-33).
-    let d_tag = buzz_db::event::extract_d_tag(event);
-    if let Some(ref d_tag) = d_tag {
-        if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
-            return Err(IngestError::Rejected(format!(
-                "invalid: d tag too long ({} bytes, max {})",
-                d_tag.len(),
-                buzz_db::event::D_TAG_MAX_LEN,
-            )));
-        }
-
-        // Command kinds normally use plain insert semantics, but workflow
-        // definitions are NIP-33 events. Serialize writers for the same
-        // coordinate and reject stale writes before executing the domain
-        // mutation, otherwise old updates can overwrite newer workflow state.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in tenant.community().as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
+        .map_err(|e| match e {
+            DbError::InvalidTimestamp(secs) => {
+                IngestError::Rejected(format!("invalid: bad timestamp {secs}"))
             }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
-
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(tenant.community().as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
-
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                return Ok(PersistResult::Duplicate);
-            }
-
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
-            )
-            .bind(tenant.community().as_uuid())
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
-        }
-    }
-
-    let result = sqlx::query(
-        r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(tenant.community().as_uuid())
-    .bind(id_bytes.as_slice())
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at)
-    .bind(kind_i32)
-    .bind(&tags_json)
-    .bind(&event.content)
-    .bind(sig_bytes.as_slice())
-    .bind(received_at)
-    .bind(channel_id)
-    .bind(d_tag.as_deref())
-    .execute(tx.as_mut())
-    .await
-    .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
-
-    if result.rows_affected() == 0 {
-        // Duplicate — rollback (implicit on drop) and signal idempotent success.
-        Ok(PersistResult::Duplicate)
-    } else {
-        Ok(PersistResult::Inserted(tx))
-    }
+            DbError::InvalidData(msg) => IngestError::Rejected(format!("invalid: {msg}")),
+            other => IngestError::Internal(format!("error: persist command event: {other}")),
+        })
 }
 
 /// Extract all `p` tag values (hex pubkeys) from an event.
@@ -347,14 +219,14 @@ async fn handle_dm_open(
 
     // Persist the command event (idempotency) — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 4. Execute: open_dm
@@ -508,14 +380,14 @@ async fn handle_dm_add_member(
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 6. Execute: open_dm with expanded set (creates NEW DM — DM sets are immutable)
@@ -614,14 +486,14 @@ async fn handle_dm_hide(
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 4. Execute: hide_dm
@@ -733,14 +605,14 @@ async fn handle_workflow_def(
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
@@ -847,14 +719,14 @@ async fn handle_workflow_trigger(
     // trigger event itself only carries the workflow UUID. Storing channel
     // triggers as global events leaks workflow IDs to unrelated relay members.
     let tx = match persist_command_event(state, tenant, event, workflow.channel_id).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 4. Execute: create workflow run
@@ -1028,14 +900,14 @@ async fn handle_approval_grant(
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 5. Execute: update approval status to granted
@@ -1139,14 +1011,14 @@ async fn handle_approval_deny(
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, tenant, event, None).await? {
-        PersistResult::Duplicate => {
+        CommandEventPersist::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
                 accepted: true,
                 message: "duplicate: already processed".into(),
             });
         }
-        PersistResult::Inserted(tx) => tx,
+        CommandEventPersist::Inserted(tx) => tx,
     };
 
     // 5. Execute: update approval status to denied

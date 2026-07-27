@@ -17,91 +17,7 @@ use buzz_core::{CommunityId, StoredEvent};
 
 use crate::error::{DbError, Result};
 
-/// Optional filters for [`query_events`].
-#[derive(Debug, Clone)]
-pub struct EventQuery {
-    /// Server-resolved community scope.
-    pub community_id: CommunityId,
-    /// Restrict results to this channel.
-    pub channel_id: Option<Uuid>,
-    /// Restrict results to these kind values (stored as `i32` in Postgres).
-    pub kinds: Option<Vec<i32>>,
-    /// Restrict results to events from this pubkey.
-    pub pubkey: Option<Vec<u8>>,
-    /// Return events created at or after this time.
-    pub since: Option<DateTime<Utc>>,
-    /// Return events created at or before this time.
-    pub until: Option<DateTime<Utc>>,
-    /// Maximum number of events to return.
-    pub limit: Option<i64>,
-    /// Number of events to skip (for pagination).
-    pub offset: Option<i64>,
-    /// Restrict to events with a `p` tag mentioning this hex pubkey.
-    /// Joins against `event_mentions` table (indexed).
-    pub p_tag_hex: Option<String>,
-    /// Restrict to events with this exact `d_tag` value (NIP-33).
-    /// Pushed into SQL via the `idx_events_parameterized` index.
-    pub d_tag: Option<String>,
-    /// Restrict to events with any of these `d_tag` values (multi-value NIP-33 pushdown).
-    /// Used when a filter has multiple `#d` values and targets only NIP-33 kinds.
-    pub d_tags: Option<Vec<String>>,
-    /// Composite keyset cursor: exclude events at or "after" this (created_at, id) pair.
-    /// Used with `until` for stable pagination: events where
-    /// `created_at < until OR (created_at = until AND id > before_id)`.
-    /// When set, `until` must also be set.
-    pub before_id: Option<Vec<u8>>,
-    /// When true, restricts results to global events (`channel_id IS NULL`).
-    /// Use for endpoints that serve non-channel data (e.g. kind:1 notes) to
-    /// defensively prevent leaking channel-scoped events if the ingest
-    /// invariant (`is_global_only_kind`) ever changes.
-    /// Mutually exclusive with `channel_id`.
-    pub global_only: bool,
-    /// Restrict results to events from any of these pubkeys (multi-author `IN` pushdown).
-    pub authors: Option<Vec<Vec<u8>>>,
-    /// Restrict results to events with any of these IDs (multi-id `IN` pushdown).
-    pub ids: Option<Vec<Vec<u8>>>,
-    /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
-    /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
-    pub e_tags: Option<Vec<String>>,
-    /// Restrict results to events in any of these channels, while retaining
-    /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
-    /// historical pages have exact exhaustion semantics.
-    pub channel_ids: Option<Vec<uuid::Uuid>>,
-    /// Override the default limit clamp (1000). Used by COUNT fallback path
-    /// which needs to fetch all matching events for post-filter counting.
-    /// When None, the default clamp of 1000 applies.
-    pub max_limit: Option<i64>,
-}
-
-impl EventQuery {
-    /// Construct an unconstrained query inside a server-resolved community.
-    ///
-    /// `community_id` has no safe default. This keeps call sites concise while
-    /// making tenant provenance explicit at construction.
-    #[must_use]
-    pub const fn for_community(community_id: CommunityId) -> Self {
-        Self {
-            community_id,
-            channel_id: None,
-            kinds: None,
-            pubkey: None,
-            since: None,
-            until: None,
-            limit: None,
-            offset: None,
-            p_tag_hex: None,
-            d_tag: None,
-            d_tags: None,
-            before_id: None,
-            global_only: false,
-            authors: None,
-            ids: None,
-            e_tags: None,
-            channel_ids: None,
-            max_limit: None,
-        }
-    }
-}
+pub use buzz_storage_api::EventQuery;
 
 /// Result of atomically inserting a kind:7 reaction event and its reaction row.
 #[derive(Debug)]
@@ -1424,6 +1340,171 @@ pub async fn release_due_reminder(
     .await?;
 
     Ok(result.rows_affected() == 1)
+}
+
+/// Result of persisting a command-kind event: either a duplicate (already
+/// processed) or an inserted row guarded by an open transaction.
+pub enum CommandEventPersist {
+    /// Event was already stored (or dominated by a newer NIP-33 write) —
+    /// treat as idempotent success and skip domain mutations.
+    Duplicate,
+    /// Event inserted — the row is held in an open transaction. Commit the
+    /// guard after the command's domain mutation succeeds.
+    Inserted(CommandEventTx),
+}
+
+/// Opaque open transaction guarding a freshly persisted command event.
+///
+/// Dropping the guard rolls back the event insert; call
+/// [`CommandEventTx::commit`] once the command's domain mutation has
+/// succeeded so the event record and mutation land together.
+pub struct CommandEventTx(CommandTxInner);
+
+/// Backend-neutral transaction holder: the guard's public shape is identical
+/// on both engines; only the wrapped transaction type differs.
+enum CommandTxInner {
+    Pg(Transaction<'static, Postgres>),
+    Sqlite(Box<crate::sqlite::event::SqliteCommandEventTx>),
+}
+
+impl CommandEventTx {
+    pub(crate) fn from_pg(tx: Transaction<'static, Postgres>) -> Self {
+        Self(CommandTxInner::Pg(tx))
+    }
+
+    pub(crate) fn from_sqlite(tx: Box<crate::sqlite::event::SqliteCommandEventTx>) -> Self {
+        Self(CommandTxInner::Sqlite(tx))
+    }
+
+    /// Commit the guarded event insert.
+    pub async fn commit(self) -> Result<()> {
+        match self.0 {
+            CommandTxInner::Pg(tx) => tx.commit().await.map_err(DbError::from),
+            CommandTxInner::Sqlite(tx) => tx.commit().await,
+        }
+    }
+}
+
+/// Persist a command-kind event inside a transaction with an idempotency
+/// guard (`ON CONFLICT DO NOTHING`).
+///
+/// For NIP-33 command kinds (those carrying a `d` tag, e.g. workflow
+/// definitions), writers for the same `(community, kind, pubkey, d_tag)`
+/// coordinate are serialized via an advisory lock and stale writes are
+/// rejected as [`CommandEventPersist::Duplicate`] (last-write-wins); the
+/// previous head is soft-deleted before the new head is inserted.
+///
+/// Domain mutations execute on the connection pool, NOT inside this
+/// transaction. The pattern is idempotent but not strictly atomic: if a
+/// mutation succeeds but commit fails, the mutation persists without the
+/// event record; on retry the event INSERT succeeds and the (idempotent)
+/// mutation re-executes.
+pub(crate) async fn persist_command_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<CommandEventPersist> {
+    let mut tx = pool.begin().await?;
+
+    let id_bytes = event.id.as_bytes();
+    let pubkey_bytes = event.pubkey.to_bytes();
+    let sig_bytes = event.sig.serialize();
+    let tags_json = serde_json::to_value(&event.tags)?;
+    let kind_i32 = event.kind.as_u16() as i32;
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let received_at = Utc::now();
+
+    // Extract d_tag for parameterized replaceable kinds (NIP-33).
+    let d_tag = extract_d_tag(event);
+    if let Some(ref d_tag) = d_tag {
+        if d_tag.len() > D_TAG_MAX_LEN {
+            return Err(DbError::InvalidData(format!(
+                "d tag too long ({} bytes, max {})",
+                d_tag.len(),
+                D_TAG_MAX_LEN,
+            )));
+        }
+
+        // Command kinds normally use plain insert semantics, but NIP-33
+        // command events (workflow definitions) replace by coordinate.
+        // Serialize writers for the same coordinate and reject stale writes
+        // before the caller executes the domain mutation, otherwise old
+        // updates can overwrite newer state.
+        let lock_key = crate::event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.as_mut())
+            .await?;
+
+        let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(tx.as_mut())
+        .await?;
+
+        let incoming_id = event.id.as_bytes().as_slice();
+        if let Some((existing_ts, existing_id)) = existing {
+            let dominated = created_at < existing_ts
+                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
+            if dominated {
+                return Ok(CommandEventPersist::Duplicate);
+            }
+
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .execute(tx.as_mut())
+            .await?;
+        }
+    }
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes.as_slice())
+    .bind(pubkey_bytes.as_slice())
+    .bind(created_at)
+    .bind(kind_i32)
+    .bind(&tags_json)
+    .bind(&event.content)
+    .bind(sig_bytes.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .bind(d_tag.as_deref())
+    .execute(tx.as_mut())
+    .await?;
+
+    if result.rows_affected() == 0 {
+        // Duplicate — rollback (implicit on drop) and signal idempotent success.
+        Ok(CommandEventPersist::Duplicate)
+    } else {
+        Ok(CommandEventPersist::Inserted(CommandEventTx::from_pg(tx)))
+    }
 }
 
 #[cfg(test)]

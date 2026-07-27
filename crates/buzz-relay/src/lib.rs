@@ -17,6 +17,7 @@ pub mod config;
 pub mod conformance;
 /// WebSocket connection lifecycle and state.
 pub mod connection;
+pub mod env_alias;
 /// Relay error types.
 pub mod error;
 /// WebSocket message handlers for NIP-01 client commands.

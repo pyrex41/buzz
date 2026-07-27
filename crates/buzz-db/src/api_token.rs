@@ -425,19 +425,33 @@ mod tests {
     async fn lookup_by_hash_is_scoped_to_community() {
         let db = setup_db().await;
 
-        let community_a = make_community(&db.pool).await;
-        let community_b = make_community(&db.pool).await;
+        let community_a = make_community(db.pg().unwrap()).await;
+        let community_b = make_community(db.pg().unwrap()).await;
 
         // Distinct pubkeys per community — FK is (community_id, owner_pubkey).
         let owner_a = vec![0xAAu8; 32];
         let owner_b = vec![0xBBu8; 32];
-        insert_user(&db.pool, community_a, &owner_a).await;
-        insert_user(&db.pool, community_b, &owner_b).await;
+        insert_user(db.pg().unwrap(), community_a, &owner_a).await;
+        insert_user(db.pg().unwrap(), community_b, &owner_b).await;
 
         // SAME hash in both communities — legal under UNIQUE(community_id, token_hash).
         let shared_hash = vec![0xCCu8; 32];
-        let id_a = raw_insert_token(&db.pool, community_a, &shared_hash, &owner_a, "token-A").await;
-        let id_b = raw_insert_token(&db.pool, community_b, &shared_hash, &owner_b, "token-B").await;
+        let id_a = raw_insert_token(
+            db.pg().unwrap(),
+            community_a,
+            &shared_hash,
+            &owner_a,
+            "token-A",
+        )
+        .await;
+        let id_b = raw_insert_token(
+            db.pg().unwrap(),
+            community_b,
+            &shared_hash,
+            &owner_b,
+            "token-B",
+        )
+        .await;
         assert_ne!(id_a, id_b, "ids must differ");
 
         let cid_a = buzz_core::CommunityId::from_uuid(community_a);
@@ -468,7 +482,7 @@ mod tests {
         );
 
         // Lookup with the hash but a third (unrelated) community returns None.
-        let community_c = make_community(&db.pool).await;
+        let community_c = make_community(db.pg().unwrap()).await;
         let cid_c = buzz_core::CommunityId::from_uuid(community_c);
         let from_c = db
             .get_api_token_by_hash_including_revoked(cid_c, &shared_hash)
@@ -488,19 +502,31 @@ mod tests {
     async fn active_lookup_by_hash_is_scoped_to_community() {
         let db = setup_db().await;
 
-        let community_a = make_community(&db.pool).await;
-        let community_b = make_community(&db.pool).await;
+        let community_a = make_community(db.pg().unwrap()).await;
+        let community_b = make_community(db.pg().unwrap()).await;
 
         let owner_a = vec![0x11u8; 32];
         let owner_b = vec![0x22u8; 32];
-        insert_user(&db.pool, community_a, &owner_a).await;
-        insert_user(&db.pool, community_b, &owner_b).await;
+        insert_user(db.pg().unwrap(), community_a, &owner_a).await;
+        insert_user(db.pg().unwrap(), community_b, &owner_b).await;
 
         let shared_hash = vec![0x33u8; 32];
-        let id_a =
-            raw_insert_token(&db.pool, community_a, &shared_hash, &owner_a, "active-A").await;
-        let id_b =
-            raw_insert_token(&db.pool, community_b, &shared_hash, &owner_b, "active-B").await;
+        let id_a = raw_insert_token(
+            db.pg().unwrap(),
+            community_a,
+            &shared_hash,
+            &owner_a,
+            "active-A",
+        )
+        .await;
+        let id_b = raw_insert_token(
+            db.pg().unwrap(),
+            community_b,
+            &shared_hash,
+            &owner_b,
+            "active-B",
+        )
+        .await;
 
         let cid_a = buzz_core::CommunityId::from_uuid(community_a);
         let cid_b = buzz_core::CommunityId::from_uuid(community_b);

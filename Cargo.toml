@@ -6,6 +6,13 @@ members = [
     "crates/buzz-push-gateway",
     "crates/buzz-db",
     "crates/buzz-pubsub",
+    "crates/buzz-messaging-api",
+    "crates/buzz-messaging-inproc",
+    "crates/buzz-messaging-zmq",
+    "crates/buzz-backend-conformance",
+    "crates/buzz-state",
+    "crates/buzz-state-api",
+    "crates/buzz-storage-api",
     "crates/buzz-auth",
     "crates/buzz-search",
     "crates/buzz-audit",
@@ -49,8 +56,10 @@ tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 
 # Database
+# The `sqlite` driver backs buzz-db's Solo-profile backend; its bundled
+# libsqlite3 ships FTS5 + JSON1 (verified — see docs/phase2 worksheets).
 sqlx = { version = "0.9", features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
+    "runtime-tokio", "tls-rustls", "postgres", "sqlite", "uuid", "chrono", "json"
 ] }
 
 # Redis
@@ -102,6 +111,10 @@ rand = "0.10"
 subtle = "2.6"
 zeroize = "1.8"
 
+# ZeroMQ transport (pure-Rust implementation)
+zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime", "tcp-transport", "ipc-transport"] }
+bytes = "1"
+
 # Concurrent data structures
 dashmap = "6"
 moka    = { version = "0.12", features = ["sync"] }
@@ -126,6 +139,13 @@ buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
+buzz-messaging-api = { path = "crates/buzz-messaging-api" }
+buzz-messaging-inproc = { path = "crates/buzz-messaging-inproc" }
+buzz-messaging-zmq = { path = "crates/buzz-messaging-zmq" }
+buzz-backend-conformance = { path = "crates/buzz-backend-conformance" }
+buzz-state = { path = "crates/buzz-state" }
+buzz-state-api = { path = "crates/buzz-state-api" }
+buzz-storage-api = { path = "crates/buzz-storage-api" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }

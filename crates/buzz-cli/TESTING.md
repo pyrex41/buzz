@@ -468,6 +468,234 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Workstreams (Hive kinds 35000-35003 / 47001-47030)
+
+The Workstream family is the non-git-centric work model: a workstream head
+(35000) owns tasks (35001), artifacts (35002), and decision records (35003);
+append-only events carry status changes (47001), artifact versions (47002),
+reviews (47010-47012), experiment logs (47020), measurements (47021), and
+handoffs (47030). Every one of these events is `h`-scoped to a channel, and
+every addressable head is referenced by a coordinate `<kind>:<pubkey>:<d-tag>`
+in an `a` tag.
+
+Two argument conventions run through the whole family:
+
+- Anywhere a flag takes an id (`--workstream`, `--target`, `--subject`,
+  `--id`), you may pass either a bare `d`-tag (owner defaults to you, or to
+  the matching `--*-owner` flag) **or** a full `35000:<pubkey>:<id>`
+  coordinate. A value containing two `:` is always read as a coordinate.
+- `--channel` is repeatable and **required on every write** — an event with no
+  `h` tag is rejected client-side before any relay call.
+
+Set up a channel and capture your own pubkey first:
+
+```bash
+CH=$(buzz channels create --name hive-runbook --type stream --visibility open \
+  | jq -r .channel_id)
+ME=$(buzz users get | jq -r '.[0].pubkey')
+```
+
+#### Workstream head (35000)
+
+```bash
+# create (d-tag = --id; republishing the same id replaces the head, NIP-33 LWW)
+buzz workstream create --id thermal-v2 --type hardware \
+  --name "Thermal chamber v2" --channel "$CH" \
+  --content "Bring-up of the second thermal chamber." | jq .
+# → {"event_id":"...","accepted":true,"message":"...","id":"thermal-v2"}
+
+# ws-type vocabulary is closed — clap rejects anything else (exit 1)
+buzz workstream create --id x --type firmware --name X --channel "$CH"; echo "exit: $?"
+
+# list (always sends an explicit kinds filter; --channel adds #h scoping)
+buzz workstream list --channel "$CH" | jq .
+buzz workstream list --channel "$CH" --type hardware --status active | jq .
+buzz --format compact workstream list --channel "$CH" | jq .
+# compact rows: {id, kind, created_at, d, name, status, a}
+
+# show resolves the current head by coordinate (newest created_at, lowest id
+# on a tie) and 404s (exit 1) when nothing is published
+buzz workstream show --id thermal-v2 | jq .
+buzz workstream show --id 35000:"$ME":thermal-v2 | jq .
+buzz workstream show --id never-published; echo "exit: $?"   # exit: 1
+
+# set-status is a read-modify-write of the head: every other tag survives and
+# created_at advances by exactly one second past the head we read
+buzz workstream set-status --id thermal-v2 --status paused | jq .
+buzz workstream show --id thermal-v2 | jq '.[0].tags'
+```
+
+#### Tasks (35001) and status history (47001)
+
+```bash
+buzz task create --id calibrate-probe --workstream thermal-v2 \
+  --name "Calibrate the thermocouple probe" --channel "$CH" \
+  --assignee "$ME" --due 2026-08-01 | jq .
+
+# malformed due dates are refused before any relay call (exit 1)
+buzz task create --id bad-due --workstream thermal-v2 --name X \
+  --channel "$CH" --due "2026-8-1"; echo "exit: $?"
+
+# list by parent workstream (#a), by channel (#h), by status or assignee
+buzz task list --workstream thermal-v2 | jq .
+buzz task list --channel "$CH" --status todo | jq .
+buzz task list --workstream thermal-v2 --assignee "$ME" | jq .
+
+# show returns the head first, then its 47001 history oldest-first
+buzz task show --id calibrate-probe | jq .
+buzz task show --id calibrate-probe --head-only | jq .
+
+# edit is a NIP-33 replace of the head — only the flags you pass change
+buzz task edit --id calibrate-probe --name "Calibrate probe (rev B)" | jq .
+buzz task edit --id calibrate-probe --clear-due | jq .
+buzz task edit --id calibrate-probe; echo "exit: $?"   # exit: 1, nothing to edit
+
+# status emits the 47001 history event AND bumps the head (two write responses)
+buzz task status --id calibrate-probe --status in-progress --note "on the bench"
+# → two JSON lines: the 47001 event, then the replaced head
+
+# --no-bump records history only
+buzz task status --id calibrate-probe --status blocked --no-bump | jq .
+
+# a no-op transition is refused before writing anything (exit 1)
+buzz task status --id calibrate-probe --status blocked; echo "exit: $?"
+```
+
+**Conflict check (exit 5).** Race two head replacements against the same read
+to confirm the NIP-33 LWW conflict path. From two shells, run
+`buzz task edit --id calibrate-probe --name A` and `... --name B` at the same
+time; the loser exits 5 with
+`{"error":"conflict","message":"conflict: the head was replaced concurrently; re-read it and retry"}`.
+
+#### Artifacts (35002) and versions (47002)
+
+```bash
+buzz artifact create --id chamber-bom --type bom \
+  --name "Thermal chamber BOM" --workstream thermal-v2 \
+  --channel "$CH" --version v1 | jq .
+
+# blob refs must be full 64-char SHA-256 digests (exit 1 otherwise)
+buzz artifact create --id bad-blob --type doc --name X --channel "$CH" \
+  --blob deadbeef; echo "exit: $?"
+
+# publish an immutable version; --hash is the SHA-256 of the payload.
+# channels default to the artifact head's own h tags.
+DIGEST=$(printf 'payload' | shasum -a 256 | cut -d' ' -f1)
+buzz artifact version --id chamber-bom --version v2 --hash "$DIGEST" \
+  --changelog "swapped in PT100 probes" --bump-head | jq .
+# --bump-head additionally replaces the head's version pointer (exit 5 on race)
+
+buzz artifact list --channel "$CH" | jq .
+buzz artifact list --workstream thermal-v2 --type bom | jq .
+buzz artifact show --id chamber-bom | jq .            # head + versions
+buzz artifact show --id chamber-bom --head-only | jq .
+```
+
+#### Reviews (47010 / 47011 / 47012)
+
+Reviews target *any* addressable workstream entity — this is the "non-code
+user completes a review cycle without git" path.
+
+```bash
+REQ=$(buzz review request --target chamber-bom --target-kind artifact \
+  --channel "$CH" --reviewer "$ME" \
+  --content "Please sanity-check the connector choices." | jq -r .event_id)
+
+# --target-kind is required unless --target is a full coordinate (exit 1)
+buzz review request --target chamber-bom --channel "$CH"; echo "exit: $?"
+
+# comments thread with NIP-10 markers; --parent nests, default replies to root
+buzz review comment --request "$REQ" --channel "$CH" \
+  --content "connector J4 pinout looks wrong" | jq .
+buzz review comment --request "$REQ" --parent "$REQ" --channel "$CH" \
+  --content "agreed" | jq .
+
+# verdicts: approve | request-changes | reject
+buzz review decide --request "$REQ" --decision request-changes \
+  --target chamber-bom --target-kind artifact --channel "$CH" \
+  --content "fix J4 then re-request" | jq .
+
+# a non-approve verdict with no rationale is refused (exit 1)
+buzz review decide --request "$REQ" --decision reject \
+  --target chamber-bom --target-kind artifact --channel "$CH"; echo "exit: $?"
+
+buzz review list --target chamber-bom --target-kind artifact | jq .
+buzz review list --channel "$CH" --requests-only | jq .
+buzz review list; echo "exit: $?"   # exit: 1 — must scope by target or channel
+```
+
+#### Decision records (35003)
+
+```bash
+buzz decision create --id adr-0001 --workstream thermal-v2 \
+  --name "Use thermocouples" --status accepted --channel "$CH" \
+  --content "## Context ..." | jq .
+
+# supersede publishes the successor and retires the predecessor in one command;
+# workstream and channel scope are inherited from the predecessor head
+buzz decision supersede --id adr-0002 --supersedes adr-0001 \
+  --name "Use PT100 probes" --content "## Context: thermocouples drift." | jq .
+# → two JSON lines: the new record, then adr-0001 replaced with status=superseded
+
+buzz decision list --workstream thermal-v2 | jq .
+buzz decision list --channel "$CH" --status superseded | jq .
+buzz decision supersede --id adr-0003 --supersedes adr-0003 --name X --content Y
+# exit: 1 — a record cannot supersede itself
+```
+
+#### Handoffs, experiments, measurements
+
+```bash
+# handoff (47030): sender is always your own identity
+buzz handoff create --workstream thermal-v2 --to "$PEER_PUBKEY" \
+  --channel "$CH" --content "Chamber is calibrated; over to data." \
+  --item "probe cal sheet attached" --item "raw logs uploaded" | jq .
+buzz handoff list --workstream thermal-v2 | jq .
+
+# experiment log (47020): --label values become t tags
+buzz experiment log --workstream thermal-v2 --id run-14 --channel "$CH" \
+  --content "Soak at 85C for 6h; no drift observed." \
+  --label soak --label thermal | jq .
+buzz experiment list --workstream thermal-v2 --label soak | jq .
+
+# measurement (47021): subject is a workstream by default, or an artifact
+buzz measure add --subject thermal-v2 --series chamber-temp \
+  --value 84.7 --unit celsius --channel "$CH" | jq .
+buzz measure add --subject chamber-bom --subject-kind artifact \
+  --series mass --value 12.4 --unit kg --channel "$CH" | jq .
+buzz measure list --subject thermal-v2 --series chamber-temp | jq .
+
+# units and series are whitespace-free labels (exit 1 otherwise)
+buzz measure add --subject thermal-v2 --series s --value 1 \
+  --unit "deg C" --channel "$CH"; echo "exit: $?"
+```
+
+#### End-to-end acceptance walk (Hive plan §8 Phase 3 exit criterion)
+
+A non-code user creates a workstream, attaches an artifact, and runs a full
+review cycle without touching git:
+
+```bash
+buzz workstream create --id demo --type design --name "Demo" --channel "$CH"
+buzz artifact create --id spec --type doc --name Spec --workstream demo --channel "$CH"
+REQ=$(buzz review request --target spec --target-kind artifact --channel "$CH" \
+  --content "ready for review" | jq -r .event_id)
+buzz review comment --request "$REQ" --channel "$CH" --content "one nit"
+buzz review decide --request "$REQ" --decision approve --target spec \
+  --target-kind artifact --channel "$CH"
+buzz review list --target spec --target-kind artifact | jq 'length'   # → 3
+```
+
+**Relay assumption:** these commands need only generic Nostr handling — kind
+registration, `h`-tag channel scoping, NIP-33 addressable replacement for
+35000-35003, and `#a`/`#d`/`#h`/`#t` tag filters on `POST /query`. No
+workstream-specific HTTP endpoint exists or is needed. If a relay build has
+not yet registered kinds 35000-35003 / 47001-47030, writes come back
+`accepted: false` and the CLI reports
+`{"error":"error","message":"relay rejected event: ..."}` with exit 4.
+
+---
+
 ---
 
 ## 7. Error Path Testing
@@ -606,3 +834,29 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 59 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
+| 62 | `workstream create` | ☐ | Repeated --channel, --member; closed ws-type vocabulary |
+| 63 | `workstream list` | ☐ | --channel/#h scoping, --type/--status filters, --format compact |
+| 64 | `workstream show` | ☐ | Bare id and full coordinate; missing head → exit 1 |
+| 65 | `workstream set-status` | ☐ | Other tags preserved; created_at advances by 1 |
+| 66 | `task create` | ☐ | Parent #a coordinate, --assignee, ISO --due validation |
+| 67 | `task list` | ☐ | By --workstream (#a), --channel (#h), --status, --assignee |
+| 68 | `task show` | ☐ | Head + 47001 history; --head-only |
+| 69 | `task edit` | ☐ | Partial edit preserves tags; no flags → exit 1; race → exit 5 |
+| 70 | `task status` | ☐ | Emits 47001 + bumps head; --no-bump; no-op transition → exit 1 |
+| 71 | `artifact create` | ☐ | --type, --version, --blob sha-256 validation |
+| 72 | `artifact version` | ☐ | --hash required; channels inherited; --bump-head → exit 5 on race |
+| 73 | `artifact list` | ☐ | --channel, --workstream, --type |
+| 74 | `artifact show` | ☐ | Head + 47002 versions; --head-only |
+| 75 | `review request` | ☐ | All four target kinds; --target-kind required for bare ids |
+| 76 | `review comment` | ☐ | NIP-10 root vs nested markers |
+| 77 | `review decide` | ☐ | approve/request-changes/reject; rationale required for non-approve |
+| 78 | `review list` | ☐ | By --target and --channel; unscoped → exit 1 |
+| 79 | `decision create` | ☐ | Parent workstream #a, status vocabulary |
+| 80 | `decision list` | ☐ | --workstream, --channel, --status |
+| 81 | `decision supersede` | ☐ | Successor + predecessor retired; self-supersede → exit 1 |
+| 82 | `handoff create` | ☐ | from/to p markers, repeated --item checklist |
+| 83 | `handoff list` | ☐ | --workstream/--channel; unscoped → exit 1 |
+| 84 | `experiment log` | ☐ | --label → t tags |
+| 85 | `experiment list` | ☐ | --label filter; unscoped → exit 1 |
+| 86 | `measure add` | ☐ | Workstream and artifact subjects; label validation |
+| 87 | `measure list` | ☐ | --series filter; unscoped → exit 1 |

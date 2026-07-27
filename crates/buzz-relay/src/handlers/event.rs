@@ -789,12 +789,12 @@ async fn handle_ephemeral_event(
 
         if status == "offline" {
             let _ = state
-                .pubsub
+                .presence
                 .clear_presence(&conn.tenant, &auth_pubkey)
                 .await;
         } else {
             let _ = state
-                .pubsub
+                .presence
                 .set_presence(&conn.tenant, &auth_pubkey, &status)
                 .await;
         }
@@ -1659,8 +1659,8 @@ mod tests {
             let origin = super::fanout_access::test_state_with_redis_url(&redis_url).await;
             let receiver = super::fanout_access::test_state_with_redis_url(&redis_url).await;
 
-            let origin_subscriber = tokio::spawn(origin.pubsub.clone().run_subscriber());
-            let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run_subscriber());
+            let origin_subscriber = tokio::spawn(origin.pubsub.clone().run());
+            let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run());
             let origin_fanout = spawn_pubsub_fanout_loop(origin.clone());
             let receiver_fanout = spawn_pubsub_fanout_loop(receiver.clone());
 
@@ -1678,11 +1678,11 @@ mod tests {
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 "test",
             );
-            origin
+            let _ = origin
                 .pubsub
                 .retain_topic(&tenant, EventTopic::Global)
                 .await;
-            receiver
+            let _ = receiver
                 .pubsub
                 .retain_topic(&tenant, EventTopic::Global)
                 .await;
@@ -1986,11 +1986,10 @@ mod tests {
             let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("redis pool");
-            let pubsub = Arc::new(
-                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+            let backends =
+                crate::state::RelayBackends::redis_from_pool(&config.redis_url, redis_pool)
                     .await
-                    .expect("pubsub manager"),
-            );
+                    .expect("backends");
             let audit = buzz_audit::AuditService::new(pool.clone());
             let auth = buzz_auth::AuthService::new(config.auth.clone());
             let search = buzz_search::SearchService::new(pool.clone());
@@ -2003,9 +2002,8 @@ mod tests {
             let (state, _audit_shutdown) = AppState::new(
                 config,
                 db,
-                redis_pool,
+                backends,
                 audit,
-                pubsub,
                 auth,
                 search,
                 workflow_engine,
@@ -2039,11 +2037,10 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let pubsub = Arc::new(
-                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+            let backends =
+                crate::state::RelayBackends::redis_from_pool(&config.redis_url, redis_pool.clone())
                     .await
-                    .ok()?,
-            );
+                    .ok()?;
             let audit = buzz_audit::AuditService::new(pool.clone());
             let auth = buzz_auth::AuthService::new(config.auth.clone());
             let search = buzz_search::SearchService::new(pool.clone());
@@ -2055,9 +2052,8 @@ mod tests {
             let (state, audit_shutdown) = AppState::new(
                 config,
                 db,
-                redis_pool,
+                backends,
                 audit,
-                pubsub,
                 auth,
                 search,
                 workflow_engine,

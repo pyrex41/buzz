@@ -1,0 +1,22 @@
+[package]
+name = "buzz-messaging-zmq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ZeroMQ PubSub backend for small static-mesh Buzz relay clusters"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-messaging-api = { workspace = true }
+bytes = { workspace = true }
+nostr = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zeromq = { workspace = true }
+
+[dev-dependencies]
+buzz-backend-conformance = { workspace = true }
+uuid = { workspace = true }

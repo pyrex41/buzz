@@ -20,6 +20,12 @@ pub(crate) const SUPPORTED_NIPS: &[u32] = &[1, 2, 10, 11, 16, 17, 23, 25, 29, 33
 /// to be verifiable by clients.
 pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 
+/// NIP-34 (git repositories). Advertised only when the git capability is
+/// enabled — with `BUZZ_CAPABILITY_GIT=false` the relay mounts no git
+/// smart-HTTP routes and refuses the NIP-34 kind family at ingest, so
+/// advertising it would send clients to endpoints that do not exist.
+pub(crate) const NIP_GIT_REPOSITORIES: u32 = 34;
+
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayInfo {
@@ -168,6 +174,22 @@ impl RelayInfo {
     }
 }
 
+/// Folds the runtime `[capabilities]` block into an already-built document.
+///
+/// NIP-11 is how a client discovers what a relay actually does, so a
+/// capability that is switched off must not be advertised. Kept separate from
+/// [`RelayInfo::build`] — which stays static-input for the multi-tenant
+/// conformance fence — and applied alongside the other runtime-derived fields
+/// in [`nip11_document`].
+///
+/// The result stays sorted, matching the invariant on [`SUPPORTED_NIPS`].
+pub(crate) fn apply_capabilities(info: &mut RelayInfo, capabilities: &crate::config::Capabilities) {
+    if capabilities.git && !info.supported_nips.contains(&NIP_GIT_REPOSITORIES) {
+        info.supported_nips.push(NIP_GIT_REPOSITORIES);
+        info.supported_nips.sort_unstable();
+    }
+}
+
 /// Axum handler that returns the NIP-11 relay information document as JSON.
 pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
@@ -242,6 +264,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
     );
+    apply_capabilities(&mut info, &state.config.capabilities);
     let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
         crate::tenant::bind_community(&state.db, raw_host)
             .await
@@ -467,6 +490,62 @@ mod tests {
             SUPPORTED_NIPS,
             &sorted[..],
             "supported_nips should be sorted"
+        );
+    }
+
+    #[test]
+    fn nip34_advertised_only_when_git_capability_is_on() {
+        let on = crate::config::Capabilities {
+            git: true,
+            huddle_audio: true,
+        };
+        let off = crate::config::Capabilities { git: false, ..on };
+
+        let mut with_git = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        apply_capabilities(&mut with_git, &on);
+        let mut without_git = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        apply_capabilities(&mut without_git, &off);
+
+        assert!(
+            with_git.supported_nips.contains(&NIP_GIT_REPOSITORIES),
+            "NIP-34 must be advertised when the relay mounts git routes"
+        );
+        assert!(
+            !without_git.supported_nips.contains(&NIP_GIT_REPOSITORIES),
+            "NIP-34 must NOT be advertised when git is disabled — the routes do not exist"
+        );
+
+        let mut sorted = with_git.supported_nips.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            with_git.supported_nips, sorted,
+            "advertised NIPs must stay sorted after the capability fold"
+        );
+    }
+
+    #[test]
+    fn apply_capabilities_is_idempotent() {
+        let on = crate::config::Capabilities {
+            git: true,
+            huddle_audio: true,
+        };
+        let mut info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        apply_capabilities(&mut info, &on);
+        let once = info.supported_nips.clone();
+        apply_capabilities(&mut info, &on);
+        assert_eq!(
+            once, info.supported_nips,
+            "re-applying capabilities must not duplicate NIP-34"
+        );
+    }
+
+    #[test]
+    fn nip34_not_in_static_supported_nips() {
+        // NIP-34 advertisement is capability-conditional and must not live in
+        // the static list, for the same reason as NIP-43 below.
+        assert!(
+            !SUPPORTED_NIPS.contains(&NIP_GIT_REPOSITORIES),
+            "NIP-34 must be advertised only via apply_capabilities"
         );
     }
 

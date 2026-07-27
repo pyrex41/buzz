@@ -48,6 +48,12 @@ pub enum DbError {
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// The operation is not available on the active storage backend
+    /// (e.g. a Postgres-only subsystem, or a method whose SQLite arm has
+    /// not landed yet). Solo-profile config gates keep these unreached.
+    #[error("unsupported on this storage backend: {0}")]
+    UnsupportedBackend(&'static str),
 }
 
 /// Convenience alias for `Result<T, DbError>`.

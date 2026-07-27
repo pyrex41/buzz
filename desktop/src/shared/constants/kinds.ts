@@ -70,6 +70,36 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
 
+// Workstream model (Hive plan §5.1). Mirrors buzz-core/src/kind.rs.
+//
+// 35000–35003 are NIP-33 addressable heads: the latest event per
+// (kind, pubkey, d) coordinate is the current state, and republishing under
+// the same `d` replaces it last-write-wins. 47001–47030 are append-only
+// history that the heads summarize — status changes, artifact versions,
+// reviews, experiments, measurements, and handoffs. Every one is `h`-tag
+// channel-scoped, so NIP-29 membership and tenant isolation apply unchanged.
+export const KIND_WORKSTREAM = 35000;
+export const KIND_WORKSTREAM_TASK = 35001;
+export const KIND_ARTIFACT = 35002;
+export const KIND_DECISION_RECORD = 35003;
+export const KIND_TASK_STATUS_CHANGE = 47001;
+export const KIND_ARTIFACT_VERSION = 47002;
+export const KIND_REVIEW_REQUEST = 47010;
+export const KIND_REVIEW_COMMENT = 47011;
+export const KIND_REVIEW_DECISION = 47012;
+export const KIND_EXPERIMENT_LOG = 47020;
+export const KIND_MEASUREMENT = 47021;
+export const KIND_HANDOFF = 47030;
+
+// The four addressable Workstream heads — the kinds that resolve through
+// last-write-wins coordinate reduction rather than accumulating.
+export const WORKSTREAM_HEAD_KINDS = [
+  KIND_WORKSTREAM,
+  KIND_WORKSTREAM_TASK,
+  KIND_ARTIFACT,
+  KIND_DECISION_RECORD,
+] as const;
+
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.
 // Reactions, edits, diffs, deletions, and system messages are deliberately

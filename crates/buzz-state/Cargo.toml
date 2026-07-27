@@ -1,0 +1,22 @@
+[package]
+name = "buzz-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-generic shared-state consumers (presence, rate limiting, NIP-98 replay) and the in-process SharedState backend"
+
+[dependencies]
+buzz-auth = { workspace = true }
+buzz-core = { workspace = true }
+buzz-state-api = { workspace = true }
+dashmap = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+buzz-backend-conformance = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+uuid = { workspace = true }

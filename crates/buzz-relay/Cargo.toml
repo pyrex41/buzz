@@ -15,12 +15,25 @@ description = "WebSocket relay server for the Buzz communications platform"
 name = "buzz-relay"
 path = "src/main.rs"
 
+# The Hive-branded spelling of the same binary (plan §8 Phase 6). Feature-
+# gated so default builds pay no extra link cost; build it explicitly with:
+#   cargo build -p buzz-relay --features hive-bin --bin hive
+[[bin]]
+name = "hive"
+path = "src/main.rs"
+required-features = ["hive-bin"]
+
 [dependencies]
 buzz-core = { workspace = true }
 buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
+buzz-messaging-api = { workspace = true }
+buzz-messaging-inproc = { workspace = true }
+buzz-messaging-zmq = { workspace = true }
+buzz-state = { workspace = true }
+buzz-state-api = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
 buzz-relay-mesh = { workspace = true }
@@ -81,6 +94,8 @@ pulldown-cmark = { version = "0.13.4", default-features = false, features = ["ht
 
 [features]
 dev = ["buzz-auth/dev"]
+# Also build the `hive` bin (identical to buzz-relay; see [[bin]] above).
+hive-bin = []
 
 [dev-dependencies]
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }

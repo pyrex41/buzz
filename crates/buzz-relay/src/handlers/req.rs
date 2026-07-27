@@ -246,12 +246,16 @@ pub async fn handle_req(
         channel_id,
     );
     if let Some(replaced) = replaced {
-        state
+        // Topic bookkeeping is best-effort: the transport reconciles interest
+        // on its own loop; a failed retain only delays cross-node delivery.
+        let _ = state
             .pubsub
             .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
             .await;
     }
-    state
+    // Topic bookkeeping is best-effort: the transport reconciles interest
+    // on its own loop; a failed retain only delays cross-node delivery.
+    let _ = state
         .pubsub
         .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
         .await;
@@ -302,7 +306,16 @@ pub async fn handle_req(
     // byte-identical to the previous serial loop.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
-    let mut results = stream::iter(filter_queries.into_iter().map(
+    // Drain the whole stream BEFORE post-processing. Phase 3 makes its own DB
+    // calls (the conformance row-community lookup); interleaving those with a
+    // partially-consumed `buffered` stream deadlocks small pools — an
+    // in-flight query future can sit un-polled holding a pooled connection
+    // while the loop body waits on the pool for another one. On the Solo
+    // profile's single-connection SQLite pool that stall is guaranteed, but
+    // the same hold-and-wait exists on Postgres whenever the pool runs hot.
+    // Memory cost is bounded: each filter's rows were already materialized by
+    // `query_events` (limit-clamped), so collecting holds nothing extra.
+    let results: Vec<_> = stream::iter(filter_queries.into_iter().map(
         |(idx, per_filter_channel, params)| {
             let db = db.clone();
             async move {
@@ -311,10 +324,12 @@ pub async fn handle_req(
             }
         },
     ))
-    .buffered(FILTER_QUERY_CONCURRENCY);
+    .buffered(FILTER_QUERY_CONCURRENCY)
+    .collect()
+    .await;
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, per_filter_channel, filter_events)) = results.next().await {
+    for (idx, per_filter_channel, filter_events) in results {
         let filter = &filters[idx];
         let events = match filter_events {
             Ok(evs) => evs,

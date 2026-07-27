@@ -10,7 +10,6 @@ use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
 use buzz_relay::config::Config;
@@ -55,7 +54,7 @@ enum EmissionScope {
 
 impl EmissionScope {
     fn from_env() -> Self {
-        let raw = std::env::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
+        let raw = buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase();
@@ -81,6 +80,24 @@ const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `buzz-relay --profile solo` — CLI spelling of BUZZ_PROFILE (the env
+    // var wins if both are set, matching every other BUZZ_* precedence).
+    // Parsed before Config::from_env, which owns the profile's semantics.
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let value = match arg.as_str() {
+            "--profile" => args.next(),
+            _ if arg.starts_with("--profile=") => arg.split_once('=').map(|(_, v)| v.to_string()),
+            _ => continue,
+        };
+        let Some(value) = value else {
+            anyhow::bail!("--profile requires a value (e.g. --profile solo)");
+        };
+        if buzz_relay::env_alias::var("BUZZ_PROFILE").is_err() {
+            std::env::set_var("BUZZ_PROFILE", value);
+        }
+    }
+
     // Install the ring CryptoProvider for rustls. Required before any rustls
     // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
     // aws-lc-rs and ring are compiled in transitively, so rustls can't
@@ -143,23 +160,51 @@ async fn main() -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
-    let db_config = DbConfig {
-        database_url: config.database_url.clone(),
-        read_database_url: config.read_database_url.clone(),
-        ..DbConfig::default()
+    let db = match config.db_backend {
+        buzz_relay::config::DbBackendKind::Postgres => {
+            let db_config = DbConfig {
+                database_url: config.database_url.clone(),
+                read_database_url: config.read_database_url.clone(),
+                ..DbConfig::default()
+            };
+            let db = Db::new(&db_config).await.map_err(|e| {
+                error!("Failed to connect to Postgres: {e}");
+                anyhow::anyhow!("DB connection failed: {e}")
+            })?;
+            if db.has_read_pool() {
+                info!("Postgres connected (writer + read replica)");
+            } else {
+                info!("Postgres connected");
+            }
+            db
+        }
+        buzz_relay::config::DbBackendKind::Sqlite => {
+            if let Some(parent) = std::path::Path::new(&config.sqlite_path).parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("create sqlite data dir: {e}"))?;
+            }
+            let db = Db::new_sqlite(&config.sqlite_path).await.map_err(|e| {
+                error!("Failed to open SQLite database: {e}");
+                anyhow::anyhow!("DB open failed: {e}")
+            })?;
+            info!(path = %config.sqlite_path, "SQLite database open");
+            db
+        }
     };
-    let db = Db::new(&db_config).await.map_err(|e| {
-        error!("Failed to connect to Postgres: {e}");
-        anyhow::anyhow!("DB connection failed: {e}")
-    })?;
-    if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
-    } else {
-        info!("Postgres connected");
-    }
+    let db_is_postgres = matches!(
+        config.db_backend,
+        buzz_relay::config::DbBackendKind::Postgres
+    );
 
-    let auto_migrate =
-        buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
+    // Solo defaults auto-migrate ON: the profile's first boot creates the
+    // SQLite file from nothing, so without migrations there is no schema at
+    // all. An explicit BUZZ_AUTO_MIGRATE still wins, matching the profile's
+    // defaults-only contract. Served (Postgres) deployments keep their
+    // explicit opt-in.
+    let auto_migrate = match buzz_relay::env_alias::var("BUZZ_AUTO_MIGRATE").ok().as_deref() {
+        None if config.solo_profile => true,
+        v => buzz_auto_migrate_enabled(v),
+    };
     if auto_migrate {
         db.migrate().await.map_err(|e| {
             error!("Failed to run database migrations: {e}");
@@ -170,8 +215,10 @@ async fn main() -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
-    if let Err(e) = db.ensure_future_partitions(3).await {
-        error!("Failed to ensure partitions: {e}");
+    if db_is_postgres {
+        if let Err(e) = db.ensure_future_partitions(3).await {
+            error!("Failed to ensure partitions: {e}");
+        }
     }
 
     // Freshness fence probe: cursor pages route to the replica only for
@@ -313,13 +360,26 @@ async fn main() -> anyhow::Result<()> {
 
     // NIP-33: backfill d_tag for any existing parameterized replaceable events
     // that predate the column addition. Idempotent — no-ops when fully populated.
-    match db.backfill_d_tags().await {
-        Ok(0) => {}
-        Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
-        Err(e) => error!("Failed to backfill d_tags: {e}"),
+    if db_is_postgres {
+        match db.backfill_d_tags().await {
+            Ok(0) => {}
+            Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
+            Err(e) => error!("Failed to backfill d_tags: {e}"),
+        }
     }
 
-    let audit = if config.audit_enabled {
+    let audit = if config.audit_enabled && !db_is_postgres {
+        // SQLite Solo profile: the audit chain shares the Db's pool (the
+        // audit_log table ships in buzz-db's sqlite migration 0002, already
+        // applied above). Appends serialize on an in-process mutex inside
+        // AuditService — sufficient because the Solo profile is single-process
+        // by definition.
+        let sqlite_pool = db.sqlite_pool().ok_or_else(|| {
+            anyhow::anyhow!("sqlite backend selected but the Db handle has no sqlite pool")
+        })?;
+        info!("Audit chain ready (SQLite)");
+        Some(AuditService::new_sqlite(sqlite_pool))
+    } else if config.audit_enabled {
         let audit_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .min_connections(1)
@@ -333,36 +393,25 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&config.redis_url);
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
-    let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
-    let pubsub = Arc::new(
-        PubSubManager::new(&config.redis_url, redis_pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+    // Messaging + shared-state backends, selected by BUZZ_MESSAGING_BACKEND:
+    // Redis (multi-pod, today's default) or in-process (single node, zero
+    // external services). Everything downstream sees only the trait objects.
+    let backends = buzz_relay::state::RelayBackends::from_config(&config).await?;
+    info!(
+        backend = ?config.messaging_backend,
+        "Messaging + shared-state backends ready"
     );
-    info!("Redis pub/sub connected");
 
-    // Spawn Redis pub/sub subscriber for multi-node fan-out.
-    // Events published by other relay instances are received here and
-    // fanned out to local WebSocket subscribers.
-    let pubsub_for_sub = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+    // Background transport driver: multi-node fan-out, cross-pod cache-key
+    // invalidation, and connection-control subscribers (reconnect loops for
+    // the Redis backend; a no-op pend for in-process). Events published by
+    // other relay instances arrive here and reach the consumer loops below.
+    let pubsub_driver = Arc::clone(&backends.pubsub);
+    tokio::spawn(async move {
+        if let Err(e) = pubsub_driver.run().await {
+            tracing::error!("pub/sub background driver stopped: {e}");
+        }
+    });
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -375,15 +424,28 @@ async fn main() -> anyhow::Result<()> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(search_db_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
-    let search = SearchService::new(search_pool);
-    info!(
-        replica = config.read_database_url.is_some(),
-        "Search service ready (Postgres FTS)"
-    );
+    let search = if db_is_postgres {
+        let search_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(search_db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+        info!(
+            replica = config.read_database_url.is_some(),
+            "Search service ready (Postgres FTS)"
+        );
+        SearchService::new(search_pool)
+    } else {
+        // SQLite profile: FTS5 queries run over the same database file,
+        // sharing the Db's pool. No FTS5 compile-option assertion is needed
+        // here — the schema migration creates the `events_fts` virtual table
+        // at boot, so a libsqlite3 built without FTS5 already failed startup
+        // before this point.
+        let sqlite_pool = db.sqlite_pool().ok_or_else(|| {
+            anyhow::anyhow!("sqlite backend selected but the Db exposes no sqlite pool")
+        })?;
+        info!("Search service ready (SQLite FTS5)");
+        SearchService::new_sqlite(sqlite_pool)
+    };
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -422,9 +484,8 @@ async fn main() -> anyhow::Result<()> {
     let (app_state, audit_shutdown) = AppState::new(
         config.clone(),
         db,
-        redis_health_pool,
+        backends,
         audit,
-        pubsub,
         auth,
         search,
         Arc::clone(&workflow_engine),
@@ -438,14 +499,22 @@ async fn main() -> anyhow::Result<()> {
     // relay behaves byte-identically to a build without the mesh. When
     // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
     // operator who asked for the mesh gets it or gets told why not.
-    if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
-        &state.config,
-        state.redis_pool.clone(),
-        &state.relay_keypair,
-        Arc::clone(&state.shutting_down),
-    )
-    .await?
-    {
+    // Mesh needs the Redis pool for session fencing; config validation
+    // guarantees `redis_pool` is Some whenever BUZZ_MESH=on (the in-process
+    // backend rejects the mesh at startup).
+    let mesh_handle = match state.redis_pool.clone() {
+        Some(mesh_redis_pool) => {
+            buzz_relay::mesh_boot::boot_mesh(
+                &state.config,
+                mesh_redis_pool,
+                &state.relay_keypair,
+                Arc::clone(&state.shutting_down),
+            )
+            .await?
+        }
+        None => None,
+    };
+    if let Some(handle) = mesh_handle {
         let runtime_id = handle.local_runtime_id;
         // Register the per-profile inbound consumers (huddle datagram fan-in,
         // HuddleControl accept loop, reliable-stream accept + optional
@@ -465,38 +534,55 @@ async fn main() -> anyhow::Result<()> {
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
-    if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
-        .map(|v| v != "false")
-        .unwrap_or(true)
-    {
-        let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32);
-        let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3);
-        let cfg = buzz_relay::api::git::store::ProbeConfig {
-            race_width,
-            race_rounds,
-        };
-        tracing::info!(
-            race_width,
-            race_rounds,
-            "running git object-store conformance probe (A3 gate)"
-        );
-        let report = state
-            .git_store
-            .run_conformance_probe(cfg)
-            .await
-            .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
-        tracing::info!(
-            race_width = report.race_width,
-            race_rounds = report.race_rounds,
-            transport_drops = report.transport_drops,
-            "git object-store backend admitted: A3 conformance probe passed"
-        );
+    //
+    // Two independent gates, both of which must open:
+    //
+    // 1. The git capability. With git off there is no `GitStore` to probe and
+    //    nothing the probe would protect, so it is skipped unconditionally —
+    //    `BUZZ_GIT_CONFORMANCE_PROBE` cannot force a probe onto a relay that
+    //    has no object store.
+    // 2. `BUZZ_GIT_CONFORMANCE_PROBE`, defaulting ON for served deployments
+    //    and OFF under `--profile solo`. The solo default stays keyed on the
+    //    profile rather than the capability so that turning git on in solo
+    //    (`BUZZ_CAPABILITY_GIT=true`, e.g. pointing at a real bucket, or a
+    //    dev box with none) still boots exactly as it did before — the probe
+    //    there remains an explicit opt-in.
+    if let Some(git) = state.git.as_ref() {
+        if buzz_relay::env_alias::var("BUZZ_GIT_CONFORMANCE_PROBE")
+            .map(|v| v != "false")
+            .unwrap_or(!config.solo_profile)
+        {
+            let race_width = buzz_relay::env_alias::var("BUZZ_GIT_PROBE_WRITERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            let race_rounds = buzz_relay::env_alias::var("BUZZ_GIT_PROBE_ROUNDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3);
+            let cfg = buzz_relay::api::git::store::ProbeConfig {
+                race_width,
+                race_rounds,
+            };
+            tracing::info!(
+                race_width,
+                race_rounds,
+                "running git object-store conformance probe (A3 gate)"
+            );
+            let report = git
+                .store
+                .run_conformance_probe(cfg)
+                .await
+                .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
+            tracing::info!(
+                race_width = report.race_width,
+                race_rounds = report.race_rounds,
+                transport_drops = report.transport_drops,
+                "git object-store backend admitted: A3 conformance probe passed"
+            );
+        }
+    } else {
+        tracing::info!("git capability disabled — skipping A3 conformance probe and git routes");
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -513,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let reconcile_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(60)
@@ -545,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
     // Only runs when BUZZ_RECONCILE_CHANNELS=true (dev/CI environments).
     // Production relays create channels through the event pipeline and don't need this.
-    if std::env::var("BUZZ_RECONCILE_CHANNELS").is_ok() {
+    if buzz_relay::env_alias::var("BUZZ_RECONCILE_CHANNELS").is_ok() {
         let reconcile_state = Arc::clone(&state);
         tokio::spawn(async move {
             // Resolve the deployment's community from the configured relay URL
@@ -605,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
     // together with the workflow engine in a future multi-pod coordination pass.
     {
         let reaper_state = Arc::clone(&state);
-        let reaper_interval_secs: u64 = std::env::var("BUZZ_REAPER_INTERVAL_SECS")
+        let reaper_interval_secs: u64 = buzz_relay::env_alias::var("BUZZ_REAPER_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
@@ -682,12 +768,14 @@ async fn main() -> anyhow::Result<()> {
     // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
     // already disabled without the exact gateway URL, so discovery and runtime
     // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    if state.config.push_gateway_delivery_url.is_some() && db_is_postgres {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    } else if state.config.push_gateway_delivery_url.is_some() {
+        info!("NIP-PL push runtime disabled: push leases require the Postgres backend");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
@@ -878,7 +966,7 @@ async fn main() -> anyhow::Result<()> {
     // so missed archive commands still converge without a global DB scan.
     {
         let lifecycle_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30)
@@ -941,7 +1029,7 @@ async fn main() -> anyhow::Result<()> {
     // Pool metrics: periodic background task polling DB + Redis pool stats.
     {
         let pool_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
+        let interval_secs = buzz_relay::env_alias::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(10)
@@ -979,11 +1067,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                let rs = pool_state.redis_pool.status();
-                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
-                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
-                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
-                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                if let Some(redis_pool) = &pool_state.redis_pool {
+                    let rs = redis_pool.status();
+                    metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                    metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                    metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                    metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                }
             }
         });
     }
@@ -998,7 +1088,7 @@ async fn main() -> anyhow::Result<()> {
     // Multi-pod semantics:
     //   DB-derived: all pods export the same value → dashboard uses max()
     //   In-memory:  each pod exports its partition → dashboard uses sum()
-    {
+    if db_is_postgres {
         let usage_state = Arc::clone(&state);
         let emission_scope = EmissionScope::from_env();
         let interval_secs = usage_interval_secs;
@@ -1243,7 +1333,7 @@ fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
 
 /// Return the usage poll interval, with a floor that prevents a busy loop.
 fn usage_metrics_interval_secs() -> u64 {
-    std::env::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
+    buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(300)
@@ -1252,7 +1342,7 @@ fn usage_metrics_interval_secs() -> u64 {
 
 /// Return a gauge lifetime that always outlives several usage-poller ticks.
 fn usage_metrics_idle_timeout_secs(interval_secs: u64) -> u64 {
-    let configured = std::env::var("BUZZ_USAGE_METRICS_IDLE_TIMEOUT_SECS")
+    let configured = buzz_relay::env_alias::var("BUZZ_USAGE_METRICS_IDLE_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse().ok());
     idle_timeout_secs(configured, interval_secs)
@@ -1375,6 +1465,15 @@ async fn run_usage_metrics_tick(
     leader: &mut Option<buzz_db::UsageMetricsLeader>,
     emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
 ) -> anyhow::Result<()> {
+    // The DB-derived usage collection (host map, leader lock, count queries)
+    // is Postgres-profile machinery; on SQLite it would fail every tick with
+    // UnsupportedBackend and log an hourly error. Solo still gets the
+    // in-memory gauges — without a host map they carry the process-local
+    // scope, which on a single-community solo relay is the whole truth.
+    if state.config.db_backend != buzz_relay::config::DbBackendKind::Postgres {
+        emit_in_memory_usage_metrics(state, emission_scope, None, emitted_in_memory);
+        return Ok(());
+    }
     let host_map: HashMap<Uuid, String> = match state.db.usage_community_hosts().await {
         Ok(hosts) => hosts
             .into_iter()
@@ -1484,7 +1583,13 @@ async fn emit_db_usage_metrics(
     let message_rows = state.db.usage_message_counts().await?;
     let relay_member_rows = state.db.usage_relay_member_counts().await?;
     let workflow_rows = state.db.usage_workflow_counts().await?;
-    let git_repo_rows = state.db.usage_git_repo_counts().await?;
+    // Git capability off ⇒ the query never runs. A relay that cannot host
+    // repositories should not be paying for a per-tick GROUP BY over them,
+    // and emitting a constant 0 would read as "repos were deleted".
+    let git_repo_rows = match state.config.capabilities.git {
+        true => Some(state.db.usage_git_repo_counts().await?),
+        false => None,
+    };
     let active_users_1d = state.db.usage_active_user_counts("1 day").await?;
     let active_users_7d = state.db.usage_active_user_counts("7 days").await?;
     let active_users_30d = state.db.usage_active_user_counts("30 days").await?;
@@ -1692,8 +1797,9 @@ async fn emit_db_usage_metrics(
     }
 
     // buzz_community_git_repos{community}
-    // Emit 0 for communities with no repos.
-    {
+    // Emit 0 for communities with no repos. Skipped entirely (no series at
+    // all) when the git capability is off — see the collection phase above.
+    if let Some(git_repo_rows) = git_repo_rows {
         let rows: HashMap<Uuid, i64> = git_repo_rows
             .into_iter()
             .map(|r| (r.community_id, r.count))

@@ -71,52 +71,119 @@ fn nip98_post_header(keys: &Keys, url: &str, body: &str) -> String {
     )
 }
 
-async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
+/// Seeding backend for the handful of rows the relay never creates on its
+/// own (test communities beyond the deployment host, relay-member roles).
+///
+/// Chosen by `DATABASE_URL`: a `sqlite:` URL targets the Solo profile's
+/// database file (the relay keeps it in WAL mode, so a second process can
+/// write while the relay serves); anything else — or the variable being
+/// absent — is the classic Postgres dev stack.
+enum E2eDb {
+    Pg(sqlx::Pool<sqlx::Postgres>),
+    Sqlite(sqlx::Pool<sqlx::Sqlite>),
+}
+
+async fn e2e_db() -> E2eDb {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("connect to e2e Postgres")
+    if database_url.starts_with("sqlite") {
+        E2eDb::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await
+                .expect("connect to e2e SQLite"),
+        )
+    } else {
+        E2eDb::Pg(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await
+                .expect("connect to e2e Postgres"),
+        )
+    }
 }
 
 async fn ensure_test_community(host: &str) -> uuid::Uuid {
-    let pool = e2e_db_pool().await;
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO communities (id, host) \
-         VALUES ($1, $2) \
-         ON CONFLICT (lower(host)) DO NOTHING",
-    )
-    .bind(id)
-    .bind(host)
-    .execute(&pool)
-    .await
-    .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
+    match e2e_db().await {
+        E2eDb::Pg(pool) => {
+            sqlx::query(
+                "INSERT INTO communities (id, host) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT (lower(host)) DO NOTHING",
+            )
+            .bind(id)
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
 
-    sqlx::query_scalar("SELECT id FROM communities WHERE lower(host) = lower($1)")
-        .bind(host)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or_else(|e| panic!("lookup community {host}: {e}"))
+            sqlx::query_scalar("SELECT id FROM communities WHERE lower(host) = lower($1)")
+                .bind(host)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("lookup community {host}: {e}"))
+        }
+        E2eDb::Sqlite(pool) => {
+            // sqlite schema: uuids are TEXT, host is COLLATE NOCASE with a
+            // plain unique index (no lower() expression index).
+            sqlx::query(
+                "INSERT INTO communities (id, host) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT (host) DO NOTHING",
+            )
+            .bind(id.to_string())
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
+
+            let id_text: String = sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")
+                .bind(host)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("lookup community {host}: {e}"));
+            id_text
+                .parse()
+                .unwrap_or_else(|e| panic!("community id {id_text} is not a uuid: {e}"))
+        }
+    }
 }
 
 async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
-    let pool = e2e_db_pool().await;
     let community_id = ensure_test_community(host).await;
-    sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, NULL) \
-         ON CONFLICT (community_id, pubkey) DO UPDATE \
-         SET role = $3, updated_at = now()",
-    )
-    .bind(community_id)
-    .bind(keys.public_key().to_hex())
-    .bind(role)
-    .execute(&pool)
-    .await
-    .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+    match e2e_db().await {
+        E2eDb::Pg(pool) => {
+            sqlx::query(
+                "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+                 VALUES ($1, $2, $3, NULL) \
+                 ON CONFLICT (community_id, pubkey) DO UPDATE \
+                 SET role = $3, updated_at = now()",
+            )
+            .bind(community_id)
+            .bind(keys.public_key().to_hex())
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+        }
+        E2eDb::Sqlite(pool) => {
+            sqlx::query(
+                "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+                 VALUES ($1, $2, $3, NULL) \
+                 ON CONFLICT (community_id, pubkey) DO UPDATE \
+                 SET role = $3, updated_at = unixepoch()",
+            )
+            .bind(community_id.to_string())
+            .bind(keys.public_key().to_hex())
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+        }
+    }
 }
 
 async fn seed_relay_owner(keys: &Keys) {
@@ -814,7 +881,7 @@ async fn test_subscription_limit_enforced() {
         client
             .collect_until_eose(&sid, Duration::from_secs(5))
             .await
-            .expect("EOSE");
+            .unwrap_or_else(|e| panic!("EOSE for sub {i}: {e:?}"));
     }
 
     let overflow_sid = sub_id("overflow");
@@ -1188,6 +1255,14 @@ async fn test_unarchive_emits_member_added_notification() {
     ws.collect_until_eose(&sid, Duration::from_secs(5))
         .await
         .expect("membership feed EOSE");
+
+    // Cross an epoch-second boundary before toggling: the unarchive-time 44100
+    // carries the same pubkey/kind/tags/content as the creation-time 44100, so
+    // landing in the same created_at second collides event ids and insert_event
+    // skips the fan-out (the known limitation documented at the emit site in
+    // side_effects.rs). On an all-local backend the whole test fits in one
+    // second, making that collision deterministic rather than flaky.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
 
     // Archive, then unarchive, the channel via kind:9002 edit-metadata.
     for archived in ["true", "false"] {

@@ -445,7 +445,25 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
-// User groups (47000–47999)
+// Workstream events (47000–47099) — reserved by the Hive implementation plan
+// (docs/hive-implementation-plan.md §5.1). Append-only history and review
+// events for the Workstream model; relay handling lands in Phase 3.
+/// A task's status changed (`a`-tag → the task's addressable coordinate).
+pub const KIND_TASK_STATUS_CHANGE: u32 = 47001;
+/// A new immutable version of an artifact (`a`-tag → artifact head).
+pub const KIND_ARTIFACT_VERSION: u32 = 47002;
+/// Request review of any artifact/task/decision — generic, not git-specific.
+pub const KIND_REVIEW_REQUEST: u32 = 47010;
+/// A comment within a review thread (NIP-10 threading).
+pub const KIND_REVIEW_COMMENT: u32 = 47011;
+/// A review verdict: approve / request-changes / reject.
+pub const KIND_REVIEW_DECISION: u32 = 47012;
+/// A free-form structured experiment log entry (`a`-tag → workstream).
+pub const KIND_EXPERIMENT_LOG: u32 = 47020;
+/// A single measurement (unit/value/series tags) for hardware & data work.
+pub const KIND_MEASUREMENT: u32 = 47021;
+/// A cross-functional handoff: from-`p`, to-`p`, checklist payload.
+pub const KIND_HANDOFF: u32 = 47030;
 
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
@@ -464,6 +482,31 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 // Media (49000–49999)
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
+
+// Workstream containers (35000–35199, parameterized replaceable) — allocated
+// by the Hive implementation plan (docs/hive-implementation-plan.md §5.1).
+//
+// These are the addressable heads of the Workstream model. Being inside
+// 30000–39999 they are NIP-33 parameterized-replaceable by
+// `is_parameterized_replaceable` alone, so the relay routes them through the
+// existing `replace_parameterized_event` last-write-wins path — there is no
+// Workstream-specific storage or replace machinery, and a stale write reports
+// the usual `duplicate:` conflict. The only Workstream-specific relay code is
+// a tag-shape gate at ingest (`buzz-relay/src/handlers/workstream.rs`), which
+// requires the `d` identifier, the `a` coordinates linking the family
+// together, and the NIP-29 `h` channel tag. References are format-validated
+// but never resolved: clients compose offline, so a task may legitimately
+// arrive before its workstream.
+/// A workstream — the primary work container (d-tag = workstream id;
+/// `ws-type` tag selects code/systems/hardware/data/design/process/docs/general).
+pub const KIND_WORKSTREAM: u32 = 35000;
+/// A task within a workstream (d-tag = task id, `a`-tag → workstream; LWW head).
+pub const KIND_WORKSTREAM_TASK: u32 = 35001;
+/// An artifact head: document, design, dataset, measurement set, BOM,
+/// simulation result… (d-tag = artifact id; versions are kind 47002 events).
+pub const KIND_ARTIFACT: u32 = 35002;
+/// A lightweight decision record (ADR-style, not code-specific; d-tag = id).
+pub const KIND_DECISION_RECORD: u32 = 35003;
 
 /// NIP-34: Repository announcement (parameterized replaceable, d-tag = repo-id).
 pub const KIND_GIT_REPO_ANNOUNCEMENT: u32 = 30617;
@@ -485,6 +528,34 @@ pub const KIND_GIT_STATUS_MERGED: u32 = 1631;
 pub const KIND_GIT_STATUS_CLOSED: u32 = 1632;
 /// NIP-34: Status — Draft.
 pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
+
+/// Every NIP-34 kind the relay accepts on behalf of its git capability.
+///
+/// When the git capability is switched off (`BUZZ_CAPABILITY_GIT=false`, the
+/// default under `BUZZ_PROFILE=solo`) the relay has no object store, no git
+/// smart-HTTP routes, and no manifest pointers — so these kinds are rejected
+/// at ingest rather than accepted into a store that can never serve them.
+/// See [`is_git_kind`].
+pub const GIT_KINDS: &[u32] = &[
+    KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE,
+    KIND_GIT_PATCH,
+    KIND_GIT_PULL_REQUEST,
+    KIND_GIT_PR_UPDATE,
+    KIND_GIT_ISSUE,
+    KIND_GIT_STATUS_OPEN,
+    KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_CLOSED,
+    KIND_GIT_STATUS_DRAFT,
+];
+
+/// Returns `true` if `kind` belongs to the NIP-34 git family ([`GIT_KINDS`]).
+///
+/// Callers use this to gate ingest on the relay's git capability; it is a
+/// pure classification and says nothing about whether git is enabled.
+pub fn is_git_kind(kind: u32) -> bool {
+    GIT_KINDS.contains(&kind)
+}
 
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
@@ -615,6 +686,18 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_MERGED,
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
+    KIND_WORKSTREAM,
+    KIND_WORKSTREAM_TASK,
+    KIND_ARTIFACT,
+    KIND_DECISION_RECORD,
+    KIND_TASK_STATUS_CHANGE,
+    KIND_ARTIFACT_VERSION,
+    KIND_REVIEW_REQUEST,
+    KIND_REVIEW_COMMENT,
+    KIND_REVIEW_DECISION,
+    KIND_EXPERIMENT_LOG,
+    KIND_MEASUREMENT,
+    KIND_HANDOFF,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -714,6 +797,17 @@ const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 3062
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 
+// Compile-time: the Workstream heads are addressable and their append-only
+// history is not. This is the whole reason the relay needs no Workstream
+// LWW machinery — the range predicate already routes 35xxx to
+// `replace_parameterized_event`.
+const _: () = assert!(is_parameterized_replaceable(KIND_WORKSTREAM)); // 35000 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_WORKSTREAM_TASK)); // 35001 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_ARTIFACT)); // 35002 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_DECISION_RECORD)); // 35003 ∈ 30000–39999
+const _: () = assert!(!is_parameterized_replaceable(KIND_TASK_STATUS_CHANGE)); // 47001: append-only
+const _: () = assert!(!is_parameterized_replaceable(KIND_HANDOFF)); // 47030: append-only
+
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(
     KIND_GIT_REPO_ANNOUNCEMENT >= PARAM_REPLACEABLE_KIND_MIN
@@ -754,6 +848,24 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn git_kinds_are_registered_and_classified() {
+        for &k in GIT_KINDS {
+            assert!(
+                ALL_KINDS.contains(&k),
+                "git kind {k} must also be a registered kind"
+            );
+            assert!(
+                is_git_kind(k),
+                "is_git_kind must accept registered git kind {k}"
+            );
+        }
+        // A neighbouring NIP-34 kind we deliberately do not register, plus a
+        // core chat kind, must not be swept into the git capability gate.
+        assert!(!is_git_kind(1620));
+        assert!(!is_git_kind(KIND_STREAM_MESSAGE));
     }
 
     #[test]

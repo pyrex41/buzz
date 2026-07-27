@@ -224,6 +224,814 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Create and track workstreams — the top-level work container (kind 35000)
+    #[command(subcommand)]
+    Workstream(WorkstreamCmd),
+    /// Create, edit, and move tasks within a workstream (kinds 35001/47001)
+    #[command(subcommand)]
+    Task(TaskCmd),
+    /// Publish artifacts and immutable versions (kinds 35002/47002)
+    #[command(subcommand)]
+    Artifact(ArtifactCmd),
+    /// Request, discuss, and decide reviews of any workstream entity (kinds 47010-47012)
+    #[command(subcommand)]
+    Review(ReviewCmd),
+    /// Record and supersede lightweight decision records (kind 35003)
+    #[command(subcommand)]
+    Decision(DecisionCmd),
+    /// Pass work between people or agents (kind 47030)
+    #[command(subcommand)]
+    Handoff(HandoffCmd),
+    /// Append structured experiment log entries (kind 47020)
+    #[command(subcommand)]
+    Experiment(ExperimentCmd),
+    /// Record measurements for hardware and data work (kind 47021)
+    #[command(subcommand)]
+    Measure(MeasureCmd),
+}
+
+/// Workstream type — the `ws-type` tag (Hive plan §5.2).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum WsTypeArg {
+    /// Software work.
+    #[value(name = "code")]
+    Code,
+    /// Systems, infrastructure, and operations work.
+    #[value(name = "systems")]
+    Systems,
+    /// Physical hardware: bring-up, BOMs, mechanical, electrical.
+    #[value(name = "hardware")]
+    Hardware,
+    /// Data engineering, analysis, and pipelines.
+    #[value(name = "data")]
+    Data,
+    /// Product, visual, or interaction design.
+    #[value(name = "design")]
+    Design,
+    /// Process, program management, and organizational work.
+    #[value(name = "process")]
+    Process,
+    /// Documentation and technical writing.
+    #[value(name = "docs")]
+    Docs,
+    /// Anything that does not fit a more specific type.
+    #[value(name = "general")]
+    General,
+}
+
+impl From<WsTypeArg> for buzz_sdk::workstream::WsType {
+    fn from(value: WsTypeArg) -> Self {
+        use buzz_sdk::workstream::WsType;
+        match value {
+            WsTypeArg::Code => WsType::Code,
+            WsTypeArg::Systems => WsType::Systems,
+            WsTypeArg::Hardware => WsType::Hardware,
+            WsTypeArg::Data => WsType::Data,
+            WsTypeArg::Design => WsType::Design,
+            WsTypeArg::Process => WsType::Process,
+            WsTypeArg::Docs => WsType::Docs,
+            WsTypeArg::General => WsType::General,
+        }
+    }
+}
+
+/// Lifecycle status of a workstream head.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum WorkstreamStatusArg {
+    /// Being worked on now.
+    #[value(name = "active")]
+    Active,
+    /// Intentionally on hold.
+    #[value(name = "paused")]
+    Paused,
+    /// Finished.
+    #[value(name = "done")]
+    Done,
+    /// Closed out or retired.
+    #[value(name = "archived")]
+    Archived,
+}
+
+impl From<WorkstreamStatusArg> for buzz_sdk::workstream::WorkstreamStatus {
+    fn from(value: WorkstreamStatusArg) -> Self {
+        use buzz_sdk::workstream::WorkstreamStatus;
+        match value {
+            WorkstreamStatusArg::Active => WorkstreamStatus::Active,
+            WorkstreamStatusArg::Paused => WorkstreamStatus::Paused,
+            WorkstreamStatusArg::Done => WorkstreamStatus::Done,
+            WorkstreamStatusArg::Archived => WorkstreamStatus::Archived,
+        }
+    }
+}
+
+/// Lifecycle status of a task.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum TaskStatusArg {
+    /// Not started.
+    #[value(name = "todo")]
+    Todo,
+    /// Actively being worked.
+    #[value(name = "in-progress")]
+    InProgress,
+    /// Waiting on something external.
+    #[value(name = "blocked")]
+    Blocked,
+    /// Complete and awaiting review.
+    #[value(name = "in-review")]
+    InReview,
+    /// Finished.
+    #[value(name = "done")]
+    Done,
+    /// Abandoned.
+    #[value(name = "cancelled")]
+    Cancelled,
+}
+
+impl From<TaskStatusArg> for buzz_sdk::workstream::TaskStatus {
+    fn from(value: TaskStatusArg) -> Self {
+        use buzz_sdk::workstream::TaskStatus;
+        match value {
+            TaskStatusArg::Todo => TaskStatus::Todo,
+            TaskStatusArg::InProgress => TaskStatus::InProgress,
+            TaskStatusArg::Blocked => TaskStatus::Blocked,
+            TaskStatusArg::InReview => TaskStatus::InReview,
+            TaskStatusArg::Done => TaskStatus::Done,
+            TaskStatusArg::Cancelled => TaskStatus::Cancelled,
+        }
+    }
+}
+
+/// Status of a decision record.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum DecisionStatusArg {
+    /// Drafted but not agreed.
+    #[value(name = "proposed")]
+    Proposed,
+    /// Agreed and in force.
+    #[value(name = "accepted")]
+    Accepted,
+    /// Considered and turned down.
+    #[value(name = "rejected")]
+    Rejected,
+    /// Replaced by a successor record.
+    #[value(name = "superseded")]
+    Superseded,
+}
+
+impl From<DecisionStatusArg> for buzz_sdk::workstream::DecisionStatus {
+    fn from(value: DecisionStatusArg) -> Self {
+        use buzz_sdk::workstream::DecisionStatus;
+        match value {
+            DecisionStatusArg::Proposed => DecisionStatus::Proposed,
+            DecisionStatusArg::Accepted => DecisionStatus::Accepted,
+            DecisionStatusArg::Rejected => DecisionStatus::Rejected,
+            DecisionStatusArg::Superseded => DecisionStatus::Superseded,
+        }
+    }
+}
+
+/// A review verdict.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ReviewVerdictArg {
+    /// Good to land.
+    #[value(name = "approve")]
+    Approve,
+    /// Needs work before it can land.
+    #[value(name = "request-changes")]
+    RequestChanges,
+    /// Should not land at all.
+    #[value(name = "reject")]
+    Reject,
+}
+
+impl From<ReviewVerdictArg> for buzz_sdk::workstream::ReviewVerdict {
+    fn from(value: ReviewVerdictArg) -> Self {
+        use buzz_sdk::workstream::ReviewVerdict;
+        match value {
+            ReviewVerdictArg::Approve => ReviewVerdict::Approve,
+            ReviewVerdictArg::RequestChanges => ReviewVerdict::RequestChanges,
+            ReviewVerdictArg::Reject => ReviewVerdict::Reject,
+        }
+    }
+}
+
+/// The addressable entity a review or measurement points at.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum EntityKindArg {
+    /// A workstream head (kind 35000).
+    #[value(name = "workstream")]
+    Workstream,
+    /// A task head (kind 35001).
+    #[value(name = "task")]
+    Task,
+    /// An artifact head (kind 35002).
+    #[value(name = "artifact")]
+    Artifact,
+    /// A decision record (kind 35003).
+    #[value(name = "decision")]
+    Decision,
+}
+
+impl EntityKindArg {
+    /// The event kind integer this entity maps to.
+    pub fn kind(self) -> u32 {
+        use buzz_core::kind::{
+            KIND_ARTIFACT, KIND_DECISION_RECORD, KIND_WORKSTREAM, KIND_WORKSTREAM_TASK,
+        };
+        match self {
+            EntityKindArg::Workstream => KIND_WORKSTREAM,
+            EntityKindArg::Task => KIND_WORKSTREAM_TASK,
+            EntityKindArg::Artifact => KIND_ARTIFACT,
+            EntityKindArg::Decision => KIND_DECISION_RECORD,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum WorkstreamCmd {
+    /// Create or replace a workstream head (kind 35000, NIP-33 addressable)
+    #[command(
+        after_help = "Examples:\n  buzz workstream create --id thermal-v2 --type hardware --name \"Thermal chamber v2\" --channel <uuid>\n  buzz workstream create --id docs-refresh --type docs --name \"Docs refresh\" --channel <uuid> --content -"
+    )]
+    Create {
+        /// Workstream identifier (d-tag): [a-zA-Z0-9._-]{1,64}
+        #[arg(long)]
+        id: String,
+        /// Workstream type — selects client presentation and persona pack
+        #[arg(long = "type", value_enum)]
+        ws_type: WsTypeArg,
+        /// Human-readable display name
+        #[arg(long)]
+        name: String,
+        /// Markdown description; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Channel UUID this workstream lives in (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Initial lifecycle status
+        #[arg(long, value_enum, default_value = "active")]
+        status: WorkstreamStatusArg,
+        /// Member or agent pubkey (64-char hex); repeatable
+        #[arg(long = "member")]
+        members: Vec<String>,
+    },
+    /// List workstream heads, scoped by channel and/or owner
+    List {
+        /// Channel UUID to scope to (h tag). Omit to list across channels.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Owner pubkey (64-char hex). Omit for any owner.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Only workstreams of this type
+        #[arg(long = "type", value_enum)]
+        ws_type: Option<WsTypeArg>,
+        /// Only workstreams in this status
+        #[arg(long, value_enum)]
+        status: Option<WorkstreamStatusArg>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Show the current head of one workstream, resolved by coordinate
+    Show {
+        /// Workstream id (d-tag) or full coordinate 35000:<pubkey>:<id>
+        #[arg(long)]
+        id: String,
+        /// Owner pubkey (64-char hex). Defaults to your own identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Replace the head with a new status (NIP-33 LWW; exit 5 on conflict)
+    SetStatus {
+        /// Workstream id (d-tag). Must be owned by your identity.
+        #[arg(long)]
+        id: String,
+        /// New lifecycle status
+        #[arg(long, value_enum)]
+        status: WorkstreamStatusArg,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskCmd {
+    /// Create or replace a task head (kind 35001, NIP-33 addressable)
+    #[command(
+        after_help = "Examples:\n  buzz task create --id calibrate --workstream thermal-v2 --name \"Calibrate probe\" --channel <uuid>\n  buzz task create --id ship --workstream 35000:<pubkey>:thermal-v2 --name Ship --channel <uuid> --due 2026-08-01"
+    )]
+    Create {
+        /// Task identifier (d-tag): [a-zA-Z0-9._-]{1,64}
+        #[arg(long)]
+        id: String,
+        /// Parent workstream id, or a full 35000:<pubkey>:<id> coordinate
+        #[arg(long)]
+        workstream: String,
+        /// Owner of the parent workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Short task title
+        #[arg(long)]
+        name: String,
+        /// Markdown body; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Initial status
+        #[arg(long, value_enum, default_value = "todo")]
+        status: TaskStatusArg,
+        /// Assignee pubkey (64-char hex)
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Due date as YYYY-MM-DD
+        #[arg(long)]
+        due: Option<String>,
+    },
+    /// List task heads, scoped by workstream, channel, status, or assignee
+    List {
+        /// Parent workstream id or full coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the parent workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Only tasks in this status
+        #[arg(long, value_enum)]
+        status: Option<TaskStatusArg>,
+        /// Only tasks assigned to this pubkey (64-char hex)
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Task author pubkey (64-char hex). Omit for any author.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Show a task head plus its status-change history (kind 47001)
+    Show {
+        /// Task id (d-tag) or full coordinate 35001:<pubkey>:<id>
+        #[arg(long)]
+        id: String,
+        /// Owner pubkey (64-char hex). Defaults to your own identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Omit the status-change history and return only the head
+        #[arg(long, default_value_t = false)]
+        head_only: bool,
+    },
+    /// Edit a task head in place (NIP-33 replace; exit 5 on conflict)
+    #[command(
+        after_help = "Only the flags you pass are changed; every other tag on the head is preserved."
+    )]
+    Edit {
+        /// Task id (d-tag). Must be owned by your identity.
+        #[arg(long)]
+        id: String,
+        /// Replacement title
+        #[arg(long)]
+        name: Option<String>,
+        /// Replacement body; use '-' to read from stdin
+        #[arg(long)]
+        content: Option<String>,
+        /// Replacement status
+        #[arg(long, value_enum)]
+        status: Option<TaskStatusArg>,
+        /// Replacement assignee pubkey (64-char hex)
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Remove the assignee
+        #[arg(long, default_value_t = false, conflicts_with = "assignee")]
+        clear_assignee: bool,
+        /// Replacement due date as YYYY-MM-DD
+        #[arg(long)]
+        due: Option<String>,
+        /// Remove the due date
+        #[arg(long, default_value_t = false, conflicts_with = "due")]
+        clear_due: bool,
+    },
+    /// Record a status change (kind 47001) and bump the task head
+    #[command(
+        after_help = "The 47001 event is the append-only history; the head is last-write-wins.\nPass --no-bump to record history without replacing the head."
+    )]
+    Status {
+        /// Task id (d-tag) or full coordinate 35001:<pubkey>:<id>
+        #[arg(long)]
+        id: String,
+        /// Owner pubkey (64-char hex). Defaults to your own identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// New status
+        #[arg(long, value_enum)]
+        status: TaskStatusArg,
+        /// Optional note recorded as the event body; use '-' for stdin
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Record the 47001 event without replacing the task head
+        #[arg(long, default_value_t = false)]
+        no_bump: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactCmd {
+    /// Create or replace an artifact head (kind 35002, NIP-33 addressable)
+    Create {
+        /// Artifact identifier (d-tag): [a-zA-Z0-9._-]{1,64}
+        #[arg(long)]
+        id: String,
+        /// Artifact type label, e.g. doc, design, dataset, measurement, bom, sim-result
+        #[arg(long = "type")]
+        artifact_type: String,
+        /// Human-readable display name
+        #[arg(long)]
+        name: String,
+        /// Markdown description or inline body; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Owning workstream id or full 35000:<pubkey>:<id> coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Current version label, e.g. v1
+        #[arg(long)]
+        version: Option<String>,
+        /// Media blob SHA-256 (64-char hex); repeatable
+        #[arg(long = "blob")]
+        blobs: Vec<String>,
+    },
+    /// Publish an immutable artifact version (kind 47002)
+    Version {
+        /// Artifact id (d-tag) or full coordinate 35002:<pubkey>:<id>
+        #[arg(long)]
+        id: String,
+        /// Artifact owner pubkey (64-char hex). Defaults to you.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Version label, e.g. v2
+        #[arg(long)]
+        version: String,
+        /// SHA-256 of the versioned payload (64-char hex)
+        #[arg(long = "hash")]
+        content_hash: String,
+        /// Changelog body; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        changelog: String,
+        /// Media blob SHA-256 (64-char hex); repeatable
+        #[arg(long = "blob")]
+        blobs: Vec<String>,
+        /// Channel UUID (h tag); repeatable. Defaults to the artifact head's channels.
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Also replace the head's version pointer (NIP-33 LWW; exit 5 on conflict)
+        #[arg(long, default_value_t = false)]
+        bump_head: bool,
+    },
+    /// List artifact heads, scoped by channel, workstream, or type
+    List {
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Owning workstream id or full coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Only artifacts of this type label
+        #[arg(long = "type")]
+        artifact_type: Option<String>,
+        /// Artifact author pubkey (64-char hex). Omit for any author.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Show an artifact head plus its version history (kind 47002)
+    Show {
+        /// Artifact id (d-tag) or full coordinate 35002:<pubkey>:<id>
+        #[arg(long)]
+        id: String,
+        /// Owner pubkey (64-char hex). Defaults to your own identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Omit the version history and return only the head
+        #[arg(long, default_value_t = false)]
+        head_only: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ReviewCmd {
+    /// Request review of any workstream entity (kind 47010)
+    #[command(
+        after_help = "Examples:\n  buzz review request --target chamber-bom --target-kind artifact --channel <uuid> --content \"check J4\"\n  buzz review request --target 35001:<pubkey>:calibrate --channel <uuid>"
+    )]
+    Request {
+        /// Target id (d-tag) or a full <kind>:<pubkey>:<id> coordinate
+        #[arg(long)]
+        target: String,
+        /// Target entity kind. Required unless --target is a full coordinate.
+        #[arg(long = "target-kind", value_enum)]
+        target_kind: Option<EntityKindArg>,
+        /// Target owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "target-owner")]
+        target_owner: Option<String>,
+        /// Request body; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Reviewer pubkey (64-char hex); repeatable
+        #[arg(long = "reviewer")]
+        reviewers: Vec<String>,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// Comment in a review thread (kind 47011, NIP-10 threading)
+    Comment {
+        /// Review request event id (64-char hex) — the thread root
+        #[arg(long)]
+        request: String,
+        /// Event id being replied to. Defaults to the thread root.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Comment body; use '-' to read from stdin
+        #[arg(long)]
+        content: String,
+        /// Optional target id or full coordinate to re-anchor the comment
+        #[arg(long)]
+        target: Option<String>,
+        /// Target entity kind. Required when --target is not a full coordinate.
+        #[arg(long = "target-kind", value_enum)]
+        target_kind: Option<EntityKindArg>,
+        /// Target owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "target-owner")]
+        target_owner: Option<String>,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// Record a review verdict (kind 47012)
+    #[command(
+        after_help = "A request-changes or reject verdict must carry a non-empty --content rationale."
+    )]
+    Decide {
+        /// Review request event id (64-char hex) being answered
+        #[arg(long)]
+        request: String,
+        /// Verdict
+        #[arg(long, value_enum)]
+        decision: ReviewVerdictArg,
+        /// Target id (d-tag) or full <kind>:<pubkey>:<id> coordinate
+        #[arg(long)]
+        target: String,
+        /// Target entity kind. Required unless --target is a full coordinate.
+        #[arg(long = "target-kind", value_enum)]
+        target_kind: Option<EntityKindArg>,
+        /// Target owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "target-owner")]
+        target_owner: Option<String>,
+        /// Rationale body; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// List review requests, comments, and decisions
+    List {
+        /// Target id or full coordinate to scope to (a tag)
+        #[arg(long)]
+        target: Option<String>,
+        /// Target entity kind. Required when --target is not a full coordinate.
+        #[arg(long = "target-kind", value_enum)]
+        target_kind: Option<EntityKindArg>,
+        /// Target owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "target-owner")]
+        target_owner: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Only review requests (47010)
+        #[arg(long, default_value_t = false)]
+        requests_only: bool,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DecisionCmd {
+    /// Create or replace a decision record (kind 35003, NIP-33 addressable)
+    Create {
+        /// Decision identifier (d-tag): [a-zA-Z0-9._-]{1,64}
+        #[arg(long)]
+        id: String,
+        /// Owning workstream id or full 35000:<pubkey>:<id> coordinate
+        #[arg(long)]
+        workstream: String,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Decision title
+        #[arg(long)]
+        name: String,
+        /// Markdown body — context, decision, consequences; use '-' for stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Decision status
+        #[arg(long, value_enum, default_value = "proposed")]
+        status: DecisionStatusArg,
+    },
+    /// List decision records, scoped by workstream or channel
+    List {
+        /// Owning workstream id or full coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Only records in this status
+        #[arg(long, value_enum)]
+        status: Option<DecisionStatusArg>,
+        /// Record author pubkey (64-char hex). Omit for any author.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Publish a replacement record and mark its predecessor superseded
+    #[command(
+        after_help = "Workstream and channels are inherited from the predecessor head.\nExits 5 if the predecessor was replaced concurrently."
+    )]
+    Supersede {
+        /// Identifier of the new record (d-tag)
+        #[arg(long)]
+        id: String,
+        /// Identifier of the record being replaced (d-tag). Must be yours.
+        #[arg(long)]
+        supersedes: String,
+        /// Title of the new record
+        #[arg(long)]
+        name: String,
+        /// Markdown body of the new record; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HandoffCmd {
+    /// Pass work to another person or agent (kind 47030)
+    Create {
+        /// Workstream id or full 35000:<pubkey>:<id> coordinate
+        #[arg(long)]
+        workstream: String,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Recipient pubkey (64-char hex). The sender is your own identity.
+        #[arg(long)]
+        to: String,
+        /// Handoff notes; use '-' to read from stdin
+        #[arg(long, default_value = "")]
+        content: String,
+        /// Checklist item; repeatable
+        #[arg(long = "item")]
+        items: Vec<String>,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// List handoffs, scoped by workstream or channel
+    List {
+        /// Workstream id or full coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExperimentCmd {
+    /// Append an experiment log entry (kind 47020)
+    Log {
+        /// Workstream id or full 35000:<pubkey>:<id> coordinate
+        #[arg(long)]
+        workstream: String,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Experiment or run identifier, e.g. run-14
+        #[arg(long = "id")]
+        experiment: String,
+        /// Log body; use '-' to read from stdin
+        #[arg(long)]
+        content: String,
+        /// Label recorded as a t tag; repeatable
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// List experiment log entries
+    List {
+        /// Workstream id or full coordinate
+        #[arg(long)]
+        workstream: Option<String>,
+        /// Owner of the workstream (64-char hex). Defaults to you.
+        #[arg(long = "workstream-owner")]
+        workstream_owner: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Only entries carrying this t label
+        #[arg(long)]
+        label: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MeasureCmd {
+    /// Record a measurement (kind 47021)
+    Add {
+        /// Workstream or artifact id, or a full <kind>:<pubkey>:<id> coordinate
+        #[arg(long)]
+        subject: String,
+        /// Subject entity kind when --subject is not a full coordinate
+        #[arg(long = "subject-kind", value_enum, default_value = "workstream")]
+        subject_kind: EntityKindArg,
+        /// Subject owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "subject-owner")]
+        subject_owner: Option<String>,
+        /// Series name, e.g. chamber-temp
+        #[arg(long)]
+        series: String,
+        /// Measured value (finite number)
+        #[arg(long)]
+        value: f64,
+        /// Unit label, e.g. celsius
+        #[arg(long)]
+        unit: String,
+        /// Optional note recorded as the event body; use '-' for stdin
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Channel UUID (h tag); repeatable
+        #[arg(long)]
+        channel: Vec<String>,
+    },
+    /// List measurements
+    List {
+        /// Workstream or artifact id, or a full coordinate
+        #[arg(long)]
+        subject: Option<String>,
+        /// Subject entity kind when --subject is not a full coordinate
+        #[arg(long = "subject-kind", value_enum, default_value = "workstream")]
+        subject_kind: EntityKindArg,
+        /// Subject owner pubkey (64-char hex). Defaults to you.
+        #[arg(long = "subject-owner")]
+        subject_owner: Option<String>,
+        /// Only points in this series
+        #[arg(long)]
+        series: Option<String>,
+        /// Channel UUID to scope to (h tag)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Maximum number of results (default 50, max 500)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1773,6 +2581,26 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Workstream(sub) => {
+            commands::workstream::dispatch_workstream(sub, &client, &cli.format).await
+        }
+        Cmd::Task(sub) => commands::workstream::dispatch_task(sub, &client, &cli.format).await,
+        Cmd::Artifact(sub) => {
+            commands::workstream::dispatch_artifact(sub, &client, &cli.format).await
+        }
+        Cmd::Review(sub) => commands::workstream::dispatch_review(sub, &client, &cli.format).await,
+        Cmd::Decision(sub) => {
+            commands::workstream::dispatch_decision(sub, &client, &cli.format).await
+        }
+        Cmd::Handoff(sub) => {
+            commands::workstream::dispatch_handoff(sub, &client, &cli.format).await
+        }
+        Cmd::Experiment(sub) => {
+            commands::workstream::dispatch_experiment(sub, &client, &cli.format).await
+        }
+        Cmd::Measure(sub) => {
+            commands::workstream::dispatch_measure(sub, &client, &cli.format).await
+        }
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -1792,12 +2620,17 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "artifact",
             "canvas",
             "channels",
+            "decision",
             "dms",
             "emoji",
+            "experiment",
             "feed",
+            "handoff",
             "issues",
+            "measure",
             "media",
             "mem",
             "messages",
@@ -1808,10 +2641,13 @@ mod tests {
             "pr",
             "reactions",
             "repos",
+            "review",
             "social",
+            "task",
             "upload",
             "users",
             "workflows",
+            "workstream",
         ];
 
         let cmd = Cli::command();
@@ -1975,6 +2811,26 @@ mod tests {
                 "untimeout"
             ]
         );
+        assert_eq!(
+            names(&cmd, "workstream"),
+            vec!["create", "list", "set-status", "show"]
+        );
+        assert_eq!(
+            names(&cmd, "task"),
+            vec!["create", "edit", "list", "show", "status"]
+        );
+        assert_eq!(
+            names(&cmd, "artifact"),
+            vec!["create", "list", "show", "version"]
+        );
+        assert_eq!(
+            names(&cmd, "review"),
+            vec!["comment", "decide", "list", "request"]
+        );
+        assert_eq!(names(&cmd, "decision"), vec!["create", "list", "supersede"]);
+        assert_eq!(names(&cmd, "handoff"), vec!["create", "list"]);
+        assert_eq!(names(&cmd, "experiment"), vec!["list", "log"]);
+        assert_eq!(names(&cmd, "measure"), vec!["add", "list"]);
     }
 
     #[test]
@@ -1998,6 +2854,14 @@ mod tests {
             ("upload", 1),
             ("users", 4),
             ("workflows", 8),
+            ("workstream", 4),
+            ("task", 5),
+            ("artifact", 4),
+            ("review", 4),
+            ("decision", 3),
+            ("handoff", 2),
+            ("experiment", 2),
+            ("measure", 2),
         ];
 
         let cmd = Cli::command();
@@ -2016,5 +2880,269 @@ mod tests {
                 group_name, expected_count, actual_count
             );
         }
+    }
+
+    // ---- Workstream family arg parsing (Hive plan §5.1) ----
+
+    /// Parse an argv slice, prefixing the binary name and a dummy key so the
+    /// global flags are satisfied.
+    fn parse_ws(args: &[&str]) -> Result<Cli, clap::Error> {
+        let key = "1".repeat(64);
+        let mut argv: Vec<&str> = vec!["buzz", "--private-key", &key];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    /// `Cli` is not `Debug`, so `expect_err` is unavailable — unwrap the
+    /// rejection explicitly.
+    fn parse_ws_err(args: &[&str], why: &str) -> clap::Error {
+        match parse_ws(args) {
+            Ok(_) => panic!("{why}"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn workstream_create_parses_repeatable_channels_and_members() {
+        let member = "b".repeat(64);
+        let cli = parse_ws(&[
+            "workstream",
+            "create",
+            "--id",
+            "thermal-v2",
+            "--type",
+            "hardware",
+            "--name",
+            "Thermal chamber v2",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--channel",
+            "22222222-2222-4222-8222-222222222222",
+            "--member",
+            &member,
+        ])
+        .expect("valid workstream create");
+        let Cmd::Workstream(WorkstreamCmd::Create {
+            id,
+            channel,
+            members,
+            status,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected workstream create");
+        };
+        assert_eq!(id, "thermal-v2");
+        assert_eq!(channel.len(), 2, "--channel is repeatable");
+        assert_eq!(members, vec![member]);
+        assert!(
+            matches!(status, WorkstreamStatusArg::Active),
+            "status defaults to active"
+        );
+    }
+
+    #[test]
+    fn workstream_create_rejects_an_unknown_ws_type() {
+        let error = parse_ws_err(
+            &[
+                "workstream",
+                "create",
+                "--id",
+                "x",
+                "--type",
+                "firmware",
+                "--name",
+                "X",
+                "--channel",
+                "11111111-1111-4111-8111-111111111111",
+            ],
+            "ws-type vocabulary is closed",
+        );
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn task_status_vocabulary_is_enforced_at_parse_time() {
+        assert!(parse_ws(&["task", "status", "--id", "t", "--status", "in-progress"]).is_ok());
+        let error = parse_ws_err(
+            &["task", "status", "--id", "t", "--status", "wip"],
+            "task status vocabulary is closed",
+        );
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn task_status_defaults_to_bumping_the_head() {
+        let cli =
+            parse_ws(&["task", "status", "--id", "t", "--status", "done"]).expect("valid status");
+        let Cmd::Task(TaskCmd::Status { no_bump, note, .. }) = cli.command else {
+            panic!("expected task status");
+        };
+        assert!(!no_bump, "the head is bumped unless --no-bump is passed");
+        assert_eq!(note, "");
+    }
+
+    #[test]
+    fn task_edit_rejects_contradictory_assignee_and_due_flags() {
+        let assignee = "c".repeat(64);
+        assert_eq!(
+            parse_ws_err(
+                &[
+                    "task",
+                    "edit",
+                    "--id",
+                    "t",
+                    "--assignee",
+                    &assignee,
+                    "--clear-assignee",
+                ],
+                "clearing and setting an assignee is contradictory",
+            )
+            .kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse_ws_err(
+                &[
+                    "task",
+                    "edit",
+                    "--id",
+                    "t",
+                    "--due",
+                    "2026-08-01",
+                    "--clear-due"
+                ],
+                "clearing and setting a due date is contradictory",
+            )
+            .kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
+    }
+
+    #[test]
+    fn review_decide_vocabulary_matches_the_spec() {
+        for verdict in ["approve", "request-changes", "reject"] {
+            assert!(
+                parse_ws(&[
+                    "review",
+                    "decide",
+                    "--request",
+                    &"d".repeat(64),
+                    "--decision",
+                    verdict,
+                    "--target",
+                    "bom",
+                    "--target-kind",
+                    "artifact",
+                    "--channel",
+                    "11111111-1111-4111-8111-111111111111",
+                ])
+                .is_ok(),
+                "{verdict} is a valid verdict"
+            );
+        }
+        assert!(parse_ws(&[
+            "review",
+            "decide",
+            "--request",
+            &"d".repeat(64),
+            "--decision",
+            "lgtm",
+            "--target",
+            "bom",
+            "--target-kind",
+            "artifact",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn entity_kind_arg_maps_to_the_addressable_kinds() {
+        use buzz_core::kind::{
+            KIND_ARTIFACT, KIND_DECISION_RECORD, KIND_WORKSTREAM, KIND_WORKSTREAM_TASK,
+        };
+        assert_eq!(EntityKindArg::Workstream.kind(), KIND_WORKSTREAM);
+        assert_eq!(EntityKindArg::Task.kind(), KIND_WORKSTREAM_TASK);
+        assert_eq!(EntityKindArg::Artifact.kind(), KIND_ARTIFACT);
+        assert_eq!(EntityKindArg::Decision.kind(), KIND_DECISION_RECORD);
+    }
+
+    #[test]
+    fn measure_add_parses_a_float_value_and_defaults_subject_kind() {
+        let cli = parse_ws(&[
+            "measure",
+            "add",
+            "--subject",
+            "thermal-v2",
+            "--series",
+            "chamber-temp",
+            "--value",
+            "84.7",
+            "--unit",
+            "celsius",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .expect("valid measure add");
+        let Cmd::Measure(MeasureCmd::Add {
+            value,
+            subject_kind,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected measure add");
+        };
+        assert!((value - 84.7).abs() < f64::EPSILON);
+        assert!(matches!(subject_kind, EntityKindArg::Workstream));
+
+        assert!(
+            parse_ws(&[
+                "measure",
+                "add",
+                "--subject",
+                "thermal-v2",
+                "--series",
+                "s",
+                "--value",
+                "not-a-number",
+                "--unit",
+                "celsius",
+                "--channel",
+                "11111111-1111-4111-8111-111111111111",
+            ])
+            .is_err(),
+            "--value must parse as a number"
+        );
+    }
+
+    #[test]
+    fn workstream_arg_enums_convert_to_their_sdk_counterparts() {
+        use buzz_sdk::workstream::{DecisionStatus, ReviewVerdict, TaskStatus, WsType};
+        assert_eq!(WsType::from(WsTypeArg::Hardware), WsType::Hardware);
+        assert_eq!(
+            TaskStatus::from(TaskStatusArg::InReview),
+            TaskStatus::InReview
+        );
+        assert_eq!(
+            DecisionStatus::from(DecisionStatusArg::Superseded),
+            DecisionStatus::Superseded
+        );
+        assert_eq!(
+            ReviewVerdict::from(ReviewVerdictArg::RequestChanges),
+            ReviewVerdict::RequestChanges
+        );
+    }
+
+    #[test]
+    fn format_is_a_global_flag_for_workstream_reads() {
+        let cli = parse_ws(&["--format", "compact", "workstream", "list"])
+            .expect("--format precedes the subcommand");
+        assert!(matches!(cli.format, OutputFormat::Compact));
+        assert!(
+            parse_ws(&["workstream", "list", "--format", "compact"]).is_err(),
+            "--format is global, not per-subcommand"
+        );
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "buzz-backend-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Behavioral conformance suite run against every SharedState and PubSub backend"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-messaging-api = { workspace = true }
+buzz-state-api = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

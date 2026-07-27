@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  KanbanSquare,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -18,6 +25,7 @@ type SidebarSelectedView =
   | "messages"
   | "agents"
   | "workflows"
+  | "workstreams"
   | "pulse"
   | "projects";
 
@@ -42,6 +50,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
+  onSelectWorkstreams: () => void;
   selectedView: SidebarSelectedView;
 };
 
@@ -87,6 +96,7 @@ export function AppSidebarPrimaryMenu({
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
+  onSelectWorkstreams,
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
   return (
@@ -166,6 +176,20 @@ export function AppSidebarPrimaryMenu({
             >
               <Zap className="h-4 w-4" />
               <SidebarMenuLabel>Workflows</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="workstreams">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-workstreams-view"
+              isActive={selectedView === "workstreams"}
+              onClick={onSelectWorkstreams}
+              tooltip="Workstreams"
+              type="button"
+            >
+              <KanbanSquare className="h-4 w-4" />
+              <SidebarMenuLabel>Workstreams</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>

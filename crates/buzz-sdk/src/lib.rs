@@ -15,6 +15,7 @@
 pub mod builders;
 pub mod mentions;
 pub mod nip_oa;
+pub mod workstream;
 
 pub use builders::*;
 

@@ -648,3 +648,44 @@ fn operator_config_fields_rejected_in_frontmatter() {
         );
     }
 }
+
+/// The Hive Workstream pack shipped with this crate must load and validate
+/// clean — no errors, no advisory warnings. It is the reference pack for
+/// non-code domains (`docs/hive-implementation-plan.md` §6), so a typo in its
+/// manifest or frontmatter is a shipped bug, not an example bug.
+#[test]
+fn shipped_hive_workstream_pack_validates() {
+    let pack_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("packs/hive-workstream");
+
+    let report = validate::validate_pack(&pack_dir);
+    assert!(
+        !report.has_errors() && !report.has_warnings(),
+        "hive-workstream pack should validate clean, got:\n{report}"
+    );
+
+    let loaded = pack::load_pack(&pack_dir).unwrap();
+    let mut names: Vec<&str> = loaded.personas.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "bringup",
+            "coordinator",
+            "critic",
+            "decision-log",
+            "pipeline-reviewer",
+            "spec-writer",
+        ],
+        "persona roster drifted from the manifest"
+    );
+
+    // Every persona carries the shared CLI skill — the persona bodies name
+    // `buzz` verbs, and the skill is where those verbs are actually spelled.
+    for p in &loaded.personas {
+        assert!(
+            p.skills.iter().any(|s| s.contains("workstream-cli")),
+            "persona {} is missing the workstream-cli skill",
+            p.name
+        );
+    }
+}

@@ -36,6 +36,8 @@ pub mod presence;
 pub mod publisher;
 /// Redis-backed rate limiter (fixed-window INCR + EXPIRE).
 pub mod rate_limiter;
+/// Redis implementation of the `buzz-state-api` SharedState contract.
+pub mod shared_state;
 /// Redis SUBSCRIBE for channel event delivery.
 pub mod subscriber;
 /// Community-scoped Redis event topics.
@@ -57,16 +59,10 @@ use crate::cache_invalidation::{
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
-/// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
-#[derive(Debug, Clone)]
-pub struct ChannelEvent {
-    /// Server-resolved community that scoped the Redis topic.
-    pub community_id: buzz_core::CommunityId,
-    /// Tenant-local routing scope for this event.
-    pub topic: EventTopic,
-    /// The Nostr event payload.
-    pub event: nostr::Event,
-}
+pub use buzz_messaging_api::ChannelEvent;
+
+use buzz_messaging_api::pubsub::BoxFuture;
+use buzz_messaging_api::{MessagingError, PubSub};
 
 /// Configuration for the pub/sub subsystem.
 #[derive(Debug, Clone)]
@@ -363,6 +359,115 @@ impl PubSubManager {
         pubkeys: &[PublicKey],
     ) -> Result<HashMap<String, String>, PubSubError> {
         presence::get_presence_bulk(&self.pool, ctx, pubkeys).await
+    }
+}
+
+/// Map a backend error onto the transport-neutral messaging error.
+fn to_messaging_error(e: PubSubError) -> MessagingError {
+    match e {
+        PubSubError::Serialization(err) => MessagingError::Serialization(err.to_string()),
+        PubSubError::BroadcastLagged(n) => MessagingError::Lagged(n),
+        PubSubError::SubscriberStopped => MessagingError::SubscriberStopped,
+        PubSubError::InvalidChannelKey(key) => {
+            MessagingError::InvalidTopic(buzz_messaging_api::TopicError(key))
+        }
+        other @ (PubSubError::Redis(_) | PubSubError::Pool(_)) => {
+            MessagingError::Backend(other.to_string())
+        }
+    }
+}
+
+/// The Redis transport implements the transport-neutral [`PubSub`] contract.
+///
+/// Inherent methods keep their richer signatures (subscriber counts, presence
+/// helpers — presence moves to `buzz-state-api` in Phase 1); the trait
+/// surface is what the relay migrates onto.
+impl PubSub for PubSubManager {
+    fn publish_event<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        topic: EventTopic,
+        event: &'a nostr::Event,
+    ) -> BoxFuture<'a, Result<(), MessagingError>> {
+        Box::pin(async move {
+            PubSubManager::publish_event(self, ctx, topic, event)
+                .await
+                .map(|_subscriber_count| ())
+                .map_err(to_messaging_error)
+        })
+    }
+
+    fn subscribe_local(&self) -> broadcast::Receiver<ChannelEvent> {
+        PubSubManager::subscribe_local(self)
+    }
+
+    fn retain_topic<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        topic: EventTopic,
+    ) -> BoxFuture<'a, Result<(), MessagingError>> {
+        Box::pin(async move {
+            PubSubManager::retain_topic(self, ctx, topic).await;
+            Ok(())
+        })
+    }
+
+    fn release_topic<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        topic: EventTopic,
+    ) -> BoxFuture<'a, Result<(), MessagingError>> {
+        Box::pin(async move {
+            PubSubManager::release_topic(self, ctx, topic).await;
+            Ok(())
+        })
+    }
+
+    fn publish_cache_invalidation<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        invalidation: &'a CacheInvalidation,
+    ) -> BoxFuture<'a, Result<(), MessagingError>> {
+        Box::pin(async move {
+            PubSubManager::publish_cache_invalidation(self, ctx, invalidation)
+                .await
+                .map(|_subscriber_count| ())
+                .map_err(to_messaging_error)
+        })
+    }
+
+    fn subscribe_cache_invalidations(&self) -> broadcast::Receiver<ScopedCacheInvalidation> {
+        PubSubManager::subscribe_cache_invalidations(self)
+    }
+
+    fn publish_conn_control<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        command: &'a ConnControl,
+    ) -> BoxFuture<'a, Result<(), MessagingError>> {
+        Box::pin(async move {
+            PubSubManager::publish_conn_control(self, ctx, command)
+                .await
+                .map(|_subscriber_count| ())
+                .map_err(to_messaging_error)
+        })
+    }
+
+    fn subscribe_conn_control(&self) -> broadcast::Receiver<ScopedConnControl> {
+        PubSubManager::subscribe_conn_control(self)
+    }
+
+    fn run(self: Arc<Self>) -> BoxFuture<'static, Result<(), MessagingError>> {
+        Box::pin(async move {
+            // The three loops reconnect internally and never return; if one
+            // somehow does, surface it so the supervisor can restart us.
+            tokio::join!(
+                Arc::clone(&self).run_subscriber(),
+                Arc::clone(&self).run_cache_invalidation_subscriber(),
+                Arc::clone(&self).run_conn_control_subscriber(),
+            );
+            Err(MessagingError::SubscriberStopped)
+        })
     }
 }
 

@@ -1130,16 +1130,34 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     Ok(config.rules)
 }
 
+/// Event kinds a mentions-mode agent subscribes to when `--kinds` is not set.
+///
+/// Chat, workflow approvals, and reminders wake the agent on conversation. The
+/// three Workstream kinds wake it on *work* addressed to it: a task head whose
+/// assignee is the agent (35001), a review request naming it as reviewer
+/// (47010), and a handoff sent to it (47030). Each of those carries a `p` tag
+/// for its target, so the mention filter narrows them to this agent exactly as
+/// it does for chat.
+///
+/// Deliberately excluded: 35000 workstream heads and the append-only history
+/// kinds. Heads are republished on every status bump, so subscribing to them
+/// would re-wake every member on each edit; history events other than the three
+/// above are not addressed to anyone in particular.
+pub const DEFAULT_MENTION_KINDS: [u32; 6] = [
+    buzz_core::kind::KIND_STREAM_MESSAGE,
+    buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+    buzz_core::kind::KIND_STREAM_REMINDER,
+    buzz_core::kind::KIND_WORKSTREAM_TASK,
+    buzz_core::kind::KIND_REVIEW_REQUEST,
+    buzz_core::kind::KIND_HANDOFF,
+];
+
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
     config: &Config,
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1154,13 +1172,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MENTION_KINDS.to_vec());
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1238,10 +1253,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1259,13 +1270,12 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MENTION_KINDS.to_vec()),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
@@ -1410,6 +1420,44 @@ mod tests {
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
+    }
+
+    /// Managed agents must wake on work addressed to them, not just on chat:
+    /// an assigned task head, a review request naming them, and a handoff.
+    #[test]
+    fn test_mentions_mode_default_kinds_include_workstream() {
+        let config = test_config(SubscribeMode::Mentions);
+        let channels = vec![Uuid::new_v4()];
+        let result = resolve_channel_filters(&config, &channels, &[]);
+        let f = result.get(&channels[0]).expect("channel should be present");
+        let kinds = f.kinds.as_ref().expect("should have kinds");
+
+        for kind in [
+            buzz_core::kind::KIND_WORKSTREAM_TASK,
+            buzz_core::kind::KIND_REVIEW_REQUEST,
+            buzz_core::kind::KIND_HANDOFF,
+        ] {
+            assert!(kinds.contains(&kind), "mentions default is missing {kind}");
+        }
+
+        // Heads that churn on every edit must stay out — subscribing to 35000
+        // would re-wake every member on each status bump.
+        assert!(!kinds.contains(&buzz_core::kind::KIND_WORKSTREAM));
+    }
+
+    /// The dynamic path (a channel joined after startup) must resolve the same
+    /// kinds as the startup path, or a late-joined agent silently misses
+    /// review requests.
+    #[test]
+    fn test_dynamic_mentions_filter_matches_startup_defaults() {
+        let config = test_config(SubscribeMode::Mentions);
+        let channel = Uuid::new_v4();
+        let dynamic = resolve_dynamic_channel_filter(&config, channel, &[])
+            .expect("mentions mode always resolves a filter");
+        assert_eq!(
+            dynamic.kinds.as_deref(),
+            Some(DEFAULT_MENTION_KINDS.as_slice())
+        );
     }
 
     #[test]

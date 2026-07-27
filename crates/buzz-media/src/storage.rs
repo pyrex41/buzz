@@ -15,9 +15,17 @@ use serde::{Deserialize, Serialize};
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
-/// S3-compatible object storage client.
+/// Media object storage — S3-compatible or local filesystem, selected by
+/// [`MediaConfig::backend`]. One public surface; every method dispatches to
+/// the configured backend, so the relay and upload pipeline never name a
+/// backend.
 pub struct MediaStorage {
-    bucket: Box<Bucket>,
+    backend: StorageBackend,
+}
+
+enum StorageBackend {
+    S3 { bucket: Box<Bucket> },
+    Local(crate::local_fs::LocalFsStorage),
 }
 
 impl MediaStorage {
@@ -32,6 +40,13 @@ impl MediaStorage {
     ///   instance-metadata providers, in that order. This lets the relay use
     ///   the pod's IAM role without long-lived static keys.
     pub fn new(config: &MediaConfig) -> Result<Self, MediaError> {
+        if config.backend == crate::config::MediaBackendKind::Local {
+            return Ok(Self {
+                backend: StorageBackend::Local(crate::local_fs::LocalFsStorage::new(
+                    &config.local_path,
+                )?),
+            });
+        }
         let region = Region::Custom {
             region: config.s3_region.clone(),
             endpoint: config.s3_endpoint.clone(),
@@ -63,7 +78,9 @@ impl MediaStorage {
         let bucket = Bucket::new(&config.s3_bucket, region, creds)
             .map_err(|e| MediaError::StorageError(e.to_string()))?
             .with_path_style();
-        Ok(Self { bucket })
+        Ok(Self {
+            backend: StorageBackend::S3 { bucket },
+        })
     }
 
     /// Store an object from a byte slice.
@@ -71,10 +88,15 @@ impl MediaStorage {
     /// Used for images, sidecars, and thumbnails. For large video files use
     /// [`put_file`] to avoid loading the entire blob into RAM.
     pub async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
-        self.bucket
-            .put_object_with_content_type(key, bytes, content_type)
-            .await?;
-        Ok(())
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                bucket
+                    .put_object_with_content_type(key, bytes, content_type)
+                    .await?;
+                Ok(())
+            }
+            StorageBackend::Local(fs) => fs.put(key, bytes).await,
+        }
     }
 
     /// Stream a file from disk into S3 without loading it into RAM.
@@ -88,25 +110,33 @@ impl MediaStorage {
         path: &Path,
         content_type: &str,
     ) -> Result<(), MediaError> {
-        const BUF: usize = 8 * 1024 * 1024; // 8 MiB read buffer
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                const BUF: usize = 8 * 1024 * 1024; // 8 MiB read buffer
 
-        let file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| MediaError::Io(e.to_string()))?;
-        let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
+                let file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|e| MediaError::Io(e.to_string()))?;
+                let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
 
-        self.bucket
-            .put_object_stream_with_content_type(&mut reader, key, content_type)
-            .await?;
-        Ok(())
+                bucket
+                    .put_object_stream_with_content_type(&mut reader, key, content_type)
+                    .await?;
+                Ok(())
+            }
+            StorageBackend::Local(fs) => fs.put_file(key, path).await,
+        }
     }
 
     /// Retrieve an object's bytes.
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, MediaError> {
-        match self.bucket.get_object(key).await {
-            Ok(response) => Ok(response.to_vec()),
-            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
-            Err(e) => Err(MediaError::StorageError(e.to_string())),
+        match &self.backend {
+            StorageBackend::S3 { bucket } => match bucket.get_object(key).await {
+                Ok(response) => Ok(response.to_vec()),
+                Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
+                Err(e) => Err(MediaError::StorageError(e.to_string())),
+            },
+            StorageBackend::Local(fs) => fs.get(key).await,
         }
     }
 
@@ -116,10 +146,15 @@ impl MediaStorage {
     /// is transferred from S3 — the full object is never loaded into RAM.
     /// Intended for HTTP 206 range responses on large video blobs.
     pub async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, MediaError> {
-        match self.bucket.get_object_range(key, start, Some(end)).await {
-            Ok(response) => Ok(response.to_vec()),
-            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
-            Err(e) => Err(MediaError::StorageError(e.to_string())),
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                match bucket.get_object_range(key, start, Some(end)).await {
+                    Ok(response) => Ok(response.to_vec()),
+                    Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
+                    Err(e) => Err(MediaError::StorageError(e.to_string())),
+                }
+            }
+            StorageBackend::Local(fs) => fs.get_range(key, start, end).await,
         }
     }
 
@@ -129,48 +164,63 @@ impl MediaStorage {
     /// The full object is never buffered — intended for streaming large
     /// blobs (video) directly into HTTP responses via `Body::from_stream()`.
     pub async fn get_stream(&self, key: &str) -> Result<ByteStream, MediaError> {
-        let response = self
-            .bucket
-            .get_object_stream(key)
-            .await
-            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                let response = bucket
+                    .get_object_stream(key)
+                    .await
+                    .map_err(|e| MediaError::StorageError(e.to_string()))?;
 
-        if response.status_code == 404 {
-            return Err(MediaError::NotFound);
+                if response.status_code == 404 {
+                    return Err(MediaError::NotFound);
+                }
+
+                let stream = futures_util::StreamExt::map(response.bytes, |chunk| {
+                    chunk.map_err(|e| MediaError::StorageError(e.to_string()))
+                });
+                Ok(Box::pin(stream))
+            }
+            StorageBackend::Local(fs) => fs.get_stream(key).await,
         }
-
-        let stream = futures_util::StreamExt::map(response.bytes, |chunk| {
-            chunk.map_err(|e| MediaError::StorageError(e.to_string()))
-        });
-        Ok(Box::pin(stream))
     }
 
     /// Check if an object exists. Returns false on 404.
     pub async fn head(&self, key: &str) -> Result<bool, MediaError> {
-        match self.bucket.head_object(key).await {
-            Ok(_) => Ok(true),
-            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(false),
-            Err(e) => Err(MediaError::StorageError(e.to_string())),
+        match &self.backend {
+            StorageBackend::S3 { bucket } => match bucket.head_object(key).await {
+                Ok(_) => Ok(true),
+                Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(false),
+                Err(e) => Err(MediaError::StorageError(e.to_string())),
+            },
+            StorageBackend::Local(fs) => fs.head(key).await,
         }
     }
 
     /// Delete an object. Returns an error on failure — callers decide whether to propagate.
     pub async fn delete(&self, key: &str) -> Result<(), MediaError> {
-        self.bucket
-            .delete_object(key)
-            .await
-            .map_err(|e| MediaError::StorageError(e.to_string()))?;
-        Ok(())
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                bucket
+                    .delete_object(key)
+                    .await
+                    .map_err(|e| MediaError::StorageError(e.to_string()))?;
+                Ok(())
+            }
+            StorageBackend::Local(fs) => fs.delete(key).await,
+        }
     }
 
     /// HEAD with metadata — returns Content-Length (size).
     pub async fn head_with_metadata(&self, key: &str) -> Result<Option<BlobHeadMeta>, MediaError> {
-        match self.bucket.head_object(key).await {
-            Ok((result, _)) => Ok(Some(BlobHeadMeta {
-                size: result.content_length.unwrap_or(0) as u64,
-            })),
-            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(None),
-            Err(e) => Err(MediaError::StorageError(e.to_string())),
+        match &self.backend {
+            StorageBackend::S3 { bucket } => match bucket.head_object(key).await {
+                Ok((result, _)) => Ok(Some(BlobHeadMeta {
+                    size: result.content_length.unwrap_or(0) as u64,
+                })),
+                Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(None),
+                Err(e) => Err(MediaError::StorageError(e.to_string())),
+            },
+            StorageBackend::Local(fs) => fs.head_with_metadata(key).await,
         }
     }
 
@@ -196,8 +246,8 @@ impl MediaStorage {
         sha256: &str,
     ) -> Result<BlobMeta, MediaError> {
         let key = Self::ctx_sidecar_key(ctx, sha256);
-        let resp = self.bucket.get_object(&key).await?;
-        let meta: BlobMeta = serde_json::from_slice(&resp.to_vec())?;
+        let bytes = self.get(&key).await?;
+        let meta: BlobMeta = serde_json::from_slice(&bytes)?;
         Ok(meta)
     }
 
@@ -244,25 +294,29 @@ impl MediaStorage {
         continuation_token: Option<String>,
         max_keys: usize,
     ) -> Result<crate::bucket_index::Page, MediaError> {
-        let (result, _status) = self
-            .bucket
-            .list_page(
-                String::new(),
-                None,
-                continuation_token,
-                None,
-                Some(max_keys),
-            )
-            .await?;
-        Ok(crate::bucket_index::Page {
-            objects: result
-                .contents
-                .into_iter()
-                .map(|obj| (obj.key, obj.size))
-                .collect(),
-            next_continuation_token: result.next_continuation_token,
-            is_truncated: result.is_truncated,
-        })
+        match &self.backend {
+            StorageBackend::S3 { bucket } => {
+                let (result, _status) = bucket
+                    .list_page(
+                        String::new(),
+                        None,
+                        continuation_token,
+                        None,
+                        Some(max_keys),
+                    )
+                    .await?;
+                Ok(crate::bucket_index::Page {
+                    objects: result
+                        .contents
+                        .into_iter()
+                        .map(|obj| (obj.key, obj.size))
+                        .collect(),
+                    next_continuation_token: result.next_continuation_token,
+                    is_truncated: result.is_truncated,
+                })
+            }
+            StorageBackend::Local(fs) => fs.list_page(continuation_token, max_keys).await,
+        }
     }
 }
 
@@ -280,6 +334,8 @@ mod tests {
 
     fn storage_config(access: &str, secret: &str) -> crate::config::MediaConfig {
         crate::config::MediaConfig {
+            backend: crate::config::MediaBackendKind::S3,
+            local_path: "./data/media".to_string(),
             s3_endpoint: "http://localhost:9000".to_string(),
             s3_access_key: access.to_string(),
             s3_secret_key: secret.to_string(),
@@ -303,8 +359,11 @@ mod tests {
     fn static_keys_build_client_with_configured_region() {
         let storage = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
             .expect("static creds should build a client");
-        match storage.bucket.region {
-            Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
+        let StorageBackend::S3 { ref bucket } = storage.backend else {
+            panic!("expected S3 backend");
+        };
+        match &bucket.region {
+            Region::Custom { region, .. } => assert_eq!(region, "us-west-2"),
             other => panic!("expected Custom region, got {other:?}"),
         }
     }

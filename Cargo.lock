@@ -367,6 +367,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -848,6 +861,7 @@ name = "buzz-audit"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-db",
  "chrono",
  "futures-util",
  "hex",
@@ -876,6 +890,18 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-backend-conformance"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-messaging-api",
+ "buzz-state-api",
+ "nostr",
+ "tokio",
  "uuid",
 ]
 
@@ -945,6 +971,7 @@ name = "buzz-db"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-storage-api",
  "chrono",
  "hex",
  "nostr",
@@ -1018,6 +1045,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-messaging-api"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "nostr",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-messaging-inproc"
+version = "0.1.0"
+dependencies = [
+ "buzz-backend-conformance",
+ "buzz-core",
+ "buzz-messaging-api",
+ "nostr",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-messaging-zmq"
+version = "0.1.0"
+dependencies = [
+ "buzz-backend-conformance",
+ "buzz-core",
+ "buzz-messaging-api",
+ "bytes",
+ "nostr",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeromq",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
@@ -1067,7 +1134,10 @@ name = "buzz-pubsub"
 version = "0.1.0"
 dependencies = [
  "buzz-auth",
+ "buzz-backend-conformance",
  "buzz-core",
+ "buzz-messaging-api",
+ "buzz-state-api",
  "chrono",
  "deadpool-redis",
  "futures-util",
@@ -1130,10 +1200,15 @@ dependencies = [
  "buzz-core",
  "buzz-db",
  "buzz-media",
+ "buzz-messaging-api",
+ "buzz-messaging-inproc",
+ "buzz-messaging-zmq",
  "buzz-pubsub",
  "buzz-relay-mesh",
  "buzz-sdk",
  "buzz-search",
+ "buzz-state",
+ "buzz-state-api",
  "buzz-workflow",
  "bytes",
  "chrono",
@@ -1221,9 +1296,43 @@ name = "buzz-search"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-db",
+ "nostr",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-state"
+version = "0.1.0"
+dependencies = [
+ "buzz-auth",
+ "buzz-backend-conformance",
+ "buzz-core",
+ "buzz-state-api",
+ "dashmap",
+ "nostr",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-state-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buzz-storage-api"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
@@ -2169,7 +2278,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4304,6 +4413,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -7622,6 +7732,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "saa"
+version = "5.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f5acb362a0e75c2a963532fa7fabf13dff81626dc494df16488d30befcbea0"
+
+[[package]]
 name = "safe-transmute"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7643,6 +7759,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scc"
+version = "3.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f733aa28b85255811ad1358d559fe9a182e39327cf5470140ed9d444de86e6d5"
+dependencies = [
+ "saa",
+ "sdd",
 ]
 
 [[package]]
@@ -7702,6 +7828,15 @@ dependencies = [
  "pbkdf2",
  "salsa20",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "sdd"
+version = "4.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1836bad8bdc9c6d665b63202da3d9c6d60ed1e597cae63620e21ebf89a3595a9"
+dependencies = [
+ "saa",
 ]
 
 [[package]]
@@ -9036,6 +9171,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",
@@ -9952,6 +10088,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
+name = "win_uds"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd30a1a28a3799479cbf4e17284a220ea9ff6bad098a9d0224543a5d1efe1da"
+dependencies = [
+ "async-io",
+ "futures-io",
+ "socket2",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10824,6 +10971,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zeromq"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb2c254fd8f366755335c9e43b865f8484fe3bd717d65ffe7c3f28852863030"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "bytes",
+ "crossbeam-queue",
+ "futures",
+ "log",
+ "num-traits",
+ "once_cell",
+ "parking_lot",
+ "rand 0.9.4",
+ "regex",
+ "scc",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "win_uds",
 ]
 
 [[package]]

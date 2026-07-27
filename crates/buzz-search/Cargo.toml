@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Postgres full-text search for Buzz, scoped by community"
+description = "Full-text search for Buzz (Postgres FTS / SQLite FTS5), scoped by community"
 
 [dependencies]
 buzz-core   = { workspace = true }
+# The workspace sqlx carries both the `postgres` and `sqlite` drivers — the
+# SQLite (FTS5) query path rides the same dependency (see root Cargo.toml).
 sqlx        = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
+buzz-db     = { workspace = true }
+nostr       = { workspace = true }

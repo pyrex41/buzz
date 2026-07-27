@@ -296,6 +296,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_STATUS_MERGED
         | KIND_GIT_STATUS_CLOSED
         | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
+        // Hive Workstream family (35000–35003 heads, 47001–47030 history).
+        // These are channel-scoped work content, not admin state: the same
+        // scope a member needs to post a message is the scope they need to
+        // open a task or log a measurement. Authorization proper is the
+        // channel-membership gate every `h`-scoped kind goes through.
+        k if crate::handlers::workstream::is_workstream_kind(k) => Ok(Scope::MessagesWrite),
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
@@ -453,6 +459,13 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
 
 /// Kinds that require an `h` tag for channel scoping.
 pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
+    // Hive Workstream family: workstreams, tasks, artifacts, decision records
+    // and their append-only history all live inside a channel, so they carry
+    // the same NIP-29 `h` tag every other channel-scoped kind does and inherit
+    // the same membership gate and tenant isolation.
+    if crate::handlers::workstream::is_workstream_kind(kind) {
+        return true;
+    }
     matches!(
         kind,
         KIND_STREAM_MESSAGE
@@ -1456,6 +1469,16 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
+    // Git capability gate. Accepting a repo announcement on a relay with no
+    // object store would advertise repositories that can never be cloned or
+    // pushed, so the NIP-34 family is refused here with a reason a client can
+    // branch on rather than a generic failure further down the pipeline.
+    if !state.config.capabilities.git && buzz_core::kind::is_git_kind(kind_u32) {
+        return Err(IngestError::Rejected(
+            "restricted: git capability disabled on this relay".into(),
+        ));
+    }
+
     // Share the event with the verify task via Arc instead of deep-cloning it
     // (tags + up to 256 KB of content). spawn_blocking only needs 'static, not
     // ownership; once it completes its Arc is dropped, so try_unwrap returns
@@ -2025,6 +2048,15 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // Hive Workstream family (35000–35003, 47001–47030): tag-shape gate only.
+    // The 35xxx heads then fall through to the shared NIP-33 replace path
+    // below (`is_parameterized_replaceable`) — there is no Workstream-specific
+    // storage or LWW machinery.
+    if crate::handlers::workstream::is_workstream_kind(kind_u32) {
+        crate::handlers::workstream::validate_workstream_event(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -2559,6 +2591,104 @@ mod tests {
         ));
     }
 
+    /// Infra-free `AppState` for the capability gate. The gate and every
+    /// check this test relies on run before the first database or Redis
+    /// access, so in-process backends and a never-connected lazy pool are
+    /// enough — and keep the test in the unit suite.
+    fn capability_gate_state(git: bool) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.capabilities.git = git;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            crate::state::RelayBackends::in_process(),
+            None,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// Ingest one signed git-kind event against a relay with `git` on or off.
+    ///
+    /// The author key deliberately differs from the authenticated identity, so
+    /// with the capability ON the event is refused by the pubkey-identity
+    /// check — the earliest DB-free rejection *after* the gate. That makes the
+    /// returned reason a direct read-out of which check fired first.
+    async fn ingest_git_kind(git: bool, kind: u32) -> IngestError {
+        let state = capability_gate_state(git);
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "git.test");
+
+        let author = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tag(nostr::Tag::identifier("demo"))
+            .sign_with_keys(&author)
+            .expect("sign git event");
+        let auth = IngestAuth::Http {
+            pubkey: nostr::Keys::generate().public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+
+        match ingest_event_inner(&state, &tracer, &tenant, event, auth).await {
+            Err(error) => error,
+            Ok(_) => panic!("a git-kind event from a mismatched identity is never accepted"),
+        }
+    }
+
+    /// With the git capability off the relay has no object store, so a repo
+    /// announcement it accepted could never be cloned or pushed. Every NIP-34
+    /// kind is refused at ingest with one machine-readable reason.
+    #[tokio::test]
+    async fn nip34_kinds_are_rejected_when_the_git_capability_is_off() {
+        for &kind in buzz_core::kind::GIT_KINDS {
+            let error = ingest_git_kind(false, kind).await;
+            match error {
+                IngestError::Rejected(reason) => assert_eq!(
+                    reason, "restricted: git capability disabled on this relay",
+                    "kind {kind} must be refused with the capability reason"
+                ),
+                other => panic!("kind {kind} should be Rejected, got {other:?}"),
+            }
+        }
+    }
+
+    /// The mirror image: with the capability on, the gate is transparent and
+    /// the git kinds continue down the ordinary ingest pipeline.
+    #[tokio::test]
+    async fn nip34_kinds_pass_the_capability_gate_when_git_is_on() {
+        for &kind in buzz_core::kind::GIT_KINDS {
+            let error = ingest_git_kind(true, kind).await;
+            let reason = match &error {
+                IngestError::Rejected(reason) | IngestError::AuthFailed(reason) => reason.clone(),
+                other => panic!("kind {kind} unexpected error: {other:?}"),
+            };
+            assert!(
+                !reason.contains("git capability"),
+                "kind {kind} must clear the capability gate when git is on, got: {reason}"
+            );
+            assert!(
+                reason.contains("event pubkey does not match"),
+                "kind {kind} should reach the identity check right after the gate, got: {reason}"
+            );
+        }
+    }
+
     #[test]
     fn nip_ia_requests_are_global_only() {
         // NIP-IA requests drive relay-global archive state; a stray `h` tag
@@ -2585,6 +2715,48 @@ mod tests {
             assert!(
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
+            );
+        }
+    }
+
+    /// The Workstream family must be admissible at all (the scope match's
+    /// catch-all rejects unknown kinds) and must be channel-scoped.
+    #[test]
+    fn workstream_kinds_are_channel_scoped_message_writes() {
+        use buzz_core::kind::{
+            KIND_ARTIFACT, KIND_ARTIFACT_VERSION, KIND_DECISION_RECORD, KIND_EXPERIMENT_LOG,
+            KIND_HANDOFF, KIND_MEASUREMENT, KIND_REVIEW_COMMENT, KIND_REVIEW_DECISION,
+            KIND_REVIEW_REQUEST, KIND_TASK_STATUS_CHANGE, KIND_WORKSTREAM, KIND_WORKSTREAM_TASK,
+        };
+        let probe = EventBuilder::new(Kind::Custom(1), "")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign probe");
+        for kind in [
+            KIND_WORKSTREAM,
+            KIND_WORKSTREAM_TASK,
+            KIND_ARTIFACT,
+            KIND_DECISION_RECORD,
+            KIND_TASK_STATUS_CHANGE,
+            KIND_ARTIFACT_VERSION,
+            KIND_REVIEW_REQUEST,
+            KIND_REVIEW_COMMENT,
+            KIND_REVIEW_DECISION,
+            KIND_EXPERIMENT_LOG,
+            KIND_MEASUREMENT,
+            KIND_HANDOFF,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &probe),
+                Ok(Scope::MessagesWrite),
+                "kind {kind} must map to a real scope, not `unknown event kind`"
+            );
+            assert!(
+                requires_h_channel_scope(kind),
+                "kind {kind} should require an h tag"
+            );
+            assert!(
+                !is_global_only_kind(kind),
+                "kind {kind} must not be global-only"
             );
         }
     }

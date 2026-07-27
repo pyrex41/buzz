@@ -1,0 +1,29 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.block.hive-workstream",
+  "name": "Hive Workstream",
+  "version": "0.1.0",
+  "description": "Six non-code agents for Workstream domains: spec writing, review, decision records, cross-functional coordination, hardware bring-up, and data-pipeline review.",
+  "license": "Apache-2.0",
+  "keywords": ["workstream", "hardware", "data", "design", "review", "non-code"],
+  "personas": [
+    "agents/coordinator.persona.md",
+    "agents/spec-writer.persona.md",
+    "agents/critic.persona.md",
+    "agents/decision-log.persona.md",
+    "agents/bringup.persona.md",
+    "agents/pipeline-reviewer.persona.md"
+  ],
+  "pack_instructions": "instructions.md",
+  "defaults": {
+    "model": "anthropic:claude-sonnet-4-20250514",
+    "temperature": 0.3,
+    "triggers": {
+      "mentions": true,
+      "keywords": [],
+      "all_messages": false
+    },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}

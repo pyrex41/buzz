@@ -28,6 +28,12 @@ pub enum PubSubError {
     InvalidChannelKey(String),
 }
 
+impl From<buzz_messaging_api::TopicError> for PubSubError {
+    fn from(e: buzz_messaging_api::TopicError) -> Self {
+        PubSubError::InvalidChannelKey(e.0)
+    }
+}
+
 impl From<tokio::sync::broadcast::error::RecvError> for PubSubError {
     fn from(e: tokio::sync::broadcast::error::RecvError) -> Self {
         match e {

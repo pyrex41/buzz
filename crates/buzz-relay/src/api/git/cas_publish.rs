@@ -1579,24 +1579,24 @@ mod tests {
     }
 
     fn probe_enabled() -> bool {
-        std::env::var("BUZZ_GIT_S3_PROBE").as_deref() == Ok("1")
+        crate::env_alias::var("BUZZ_GIT_S3_PROBE").as_deref() == Ok("1")
     }
 
     fn live_store() -> GitStore {
-        let endpoint = std::env::var("BUZZ_GIT_S3_ENDPOINT")
-            .or_else(|_| std::env::var("BUZZ_S3_ENDPOINT"))
+        let endpoint = crate::env_alias::var("BUZZ_GIT_S3_ENDPOINT")
+            .or_else(|_| crate::env_alias::var("BUZZ_S3_ENDPOINT"))
             .unwrap_or_else(|_| "http://localhost:9000".into());
-        let access_key = std::env::var("BUZZ_GIT_S3_ACCESS_KEY")
-            .or_else(|_| std::env::var("BUZZ_S3_ACCESS_KEY"))
+        let access_key = crate::env_alias::var("BUZZ_GIT_S3_ACCESS_KEY")
+            .or_else(|_| crate::env_alias::var("BUZZ_S3_ACCESS_KEY"))
             .unwrap_or_else(|_| "buzz_dev".into());
-        let secret_key = std::env::var("BUZZ_GIT_S3_SECRET_KEY")
-            .or_else(|_| std::env::var("BUZZ_S3_SECRET_KEY"))
+        let secret_key = crate::env_alias::var("BUZZ_GIT_S3_SECRET_KEY")
+            .or_else(|_| crate::env_alias::var("BUZZ_S3_SECRET_KEY"))
             .unwrap_or_else(|_| "buzz_dev_secret".into());
-        let bucket = std::env::var("BUZZ_GIT_S3_BUCKET")
-            .or_else(|_| std::env::var("BUZZ_S3_BUCKET"))
+        let bucket = crate::env_alias::var("BUZZ_GIT_S3_BUCKET")
+            .or_else(|_| crate::env_alias::var("BUZZ_S3_BUCKET"))
             .unwrap_or_else(|_| "buzz-media".into());
-        let region = std::env::var("BUZZ_GIT_S3_REGION")
-            .or_else(|_| std::env::var("BUZZ_S3_REGION"))
+        let region = crate::env_alias::var("BUZZ_GIT_S3_REGION")
+            .or_else(|_| crate::env_alias::var("BUZZ_S3_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());
         GitStore::new(&endpoint, &access_key, &secret_key, &bucket, &region).expect("connect minio")
     }
